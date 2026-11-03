@@ -1,0 +1,22 @@
+{
+    "discord_token": "",
+    "server_channels": {
+        "spectral": 1566873954713473385,
+        "venus": 1566909098195157012,
+        "goob-sigma": 1566913512716902550,
+        "goob-basileus": 1567115471268876289,
+        "vp": 1566960659030089788
+    },
+    "dashboard_messages": {
+        "spectral": 1567122871266971680,
+        "venus": 1567122885900894239,
+        "vp": 1567122935498678303,
+        "goob-basileus": 1567128539038224495,
+        "goob-sigma": 1567151874526945321
+    },
+    "live_dashboard_only": true,
+    "alert_channel_id": 1566873954713473385,
+    "default_server": "spectral",
+    "prometheus_url": "http://185.97.255.6:9090",
+    "poll_interval_seconds": 5
+}
