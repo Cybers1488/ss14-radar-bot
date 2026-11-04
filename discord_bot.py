@@ -271,7 +271,6 @@ GHOST_ROLE_EVENTS = {
 
 MIDROUND_ANTAG_EVENTS = {
     "SleeperAgents": "Спящие агенты Синдиката (активация)",
-    "GreytideVirus": "Вирус грейтайда",
     "Thief": "Воры (мидраунд)",
     "Traitor": "Предатели (мидраунд)",
     "Zombie": "Зомби-инфекция (мидраунд)",
@@ -347,7 +346,6 @@ ANTAG_ROLE_NAMES = {
     "Shadowling": "Тенеморф (Shadowling)",
     "SiliconLiberation": "Восстание боргов (SiliconLiberation)",
     "SleeperAgents": "Спящие агенты (SleeperAgents)",
-    "GreytideVirus": "Вирус грейтайда (GreytideVirus)",
     "DropPodEngineeringRepair": "Инженерный дроппод (DropPodEngineeringRepair)",
     "ClownGoblinMigration": "Миграция клоунов-гоблинов (ClownGoblinMigration)",
     "CockroachMigration": "Миграция тараканов (CockroachMigration)",
@@ -699,7 +697,6 @@ GAMERULE_DESCRIPTIONS = {
     "SubvertedSilicon": "Взломанный ИИ / борг",
     "SiliconLiberation": "Восстание боргов",
     "Xenoborgs": "Ксеноборги",
-    "GreytideVirus": "Вирус грейтайда",
     "PirateSmall": "Пиратский малый шаттл",
     "PirateMedium": "Боевой корвет пиратов",
     "KingRatMigration": "Крысиный король",
@@ -1106,9 +1103,18 @@ class ServerTracker:
         self.goob_evac_called = False
         self.goob_evac_docked = False
         self.goob_evac_call_time = 0
+        self.goob_evac_msg = None
         self.goob_lobby_purged = False
         self.goob_gamerules_announced = set()
         self.goob_physical_spawns_announced = set()
+
+        # Corvax / Sunrise / Fish tracking
+        self.corvax_last_run_level = None
+        self.corvax_last_round_id = None
+        self.corvax_round_ended = False
+        self.corvax_lobby_purged = False
+        self.corvax_map = None
+        self.corvax_preset = None
 
         # Adventure Time (VP) tracking
         self.vp_last_run_level = None
@@ -1277,9 +1283,10 @@ class TelemetryBot(commands.Bot):
     async def notify_channel(self, channel: discord.TextChannel, message: str, is_critical: bool = False):
         if not self.cfg.get("live_dashboard_only", True) or is_critical:
             try:
-                await channel.send(message)
+                return await channel.send(message)
             except Exception:
                 pass
+        return None
 
     @tasks.loop(seconds=5)
     async def radar_loop(self):
@@ -1301,16 +1308,34 @@ class TelemetryBot(commands.Bot):
         if not channel:
             return
 
+        tag = "PERSEUS" if job in ("perseus", "persey") else job.upper()
+
+        # 0. Live Server Status
+        status_data = {}
+        try:
+            status_job = "perseus" if job in ("perseus", "persey") else job
+            async with self.session.get(f"https://server.ss14.org/{status_job}/status", timeout=aiohttp.ClientTimeout(total=3), ssl=False) as resp:
+                if resp.status == 200:
+                    status_data = await resp.json()
+        except Exception:
+            pass
+
+        run_level = status_data.get("run_level")
+        status_map = status_data.get("map")
+        status_round_id = status_data.get("round_id")
+        status_players = status_data.get("players")
+        status_preset = status_data.get("preset")
+
         # 1. Round State & Length
         round_data = await prom_query(prom_url, self.session, f"ss14_round_number{{job='{job}'}}")
-        cur_round = round_data[0]["value"][1] if round_data else None
+        cur_round = round_data[0]["value"][1] if round_data else (str(status_round_id) if status_round_id else None)
 
         len_data = await prom_query(prom_url, self.session, f"ss14_round_length{{job='{job}'}}")
         round_len = int(float(len_data[0]["value"][1])) if len_data and len_data[0]["value"][1] else 0
 
         # Living player counts
         alive_res = await prom_query(prom_url, self.session, f"ss14_storyteller_alive_players{{job='{job}'}}")
-        alive = alive_res[0]["value"][1] if alive_res else "?"
+        alive = alive_res[0]["value"][1] if alive_res else (status_players or "?")
         dead_res = await prom_query(prom_url, self.session, f"ss14_storyteller_dead_players{{job='{job}'}}")
         dead = dead_res[0]["value"][1] if dead_res else "?"
         antag_res = await prom_query(prom_url, self.session, f"antags_player_count{{job='{job}'}}")
@@ -1328,7 +1353,7 @@ class TelemetryBot(commands.Bot):
             elif state == "deadminned":
                 deadminned_admins = val
 
-        # 2. ROUND END DETECTION
+        # 2. INITIALIZATION
         gm_rounds_data = await prom_query(prom_url, self.session, f"ss14_rounds_by_gamemode_total{{job='{job}'}}")
         if not t.initialized:
             for g in gm_rounds_data:
@@ -1356,6 +1381,9 @@ class TelemetryBot(commands.Bot):
             t.last_antag_count = cur_antags
             t.last_active_admins = active_admins
             t.last_deadminned_admins = deadminned_admins
+            t.corvax_last_run_level = run_level
+            t.corvax_last_round_id = status_round_id
+            t.corvax_map = status_map
 
             curr_init = await prom_query(prom_url, self.session, f"ss14_store_currency_spent_total{{job='{job}'}}")
             for c in curr_init:
@@ -1375,58 +1403,60 @@ class TelemetryBot(commands.Bot):
                 t.known_antag_objectives[role] = int(o["value"][1])
 
             t.initialized = True
+            return
 
-        # Check for completed round
+        # 3. ROUND END DETECTION
+        is_round_ended = False
+        if t.corvax_last_run_level == 1 and run_level == 2 and not t.corvax_round_ended:
+            is_round_ended = True
+
         for g in gm_rounds_data:
             gm_name = g.get("metric", {}).get("gamemode")
             cnt = int(g["value"][1])
             prev = t.known_rounds_by_gm.get(gm_name, cnt)
             if cnt > prev:
                 t.known_rounds_by_gm[gm_name] = cnt
-                m, s = divmod(t.last_round_length, 60)
-                preset_title = PRESET_NAMES.get(t.current_preset, t.current_preset or gm_name)
-                await self.notify_channel(channel, 
-                    f"**[{job.upper()}]** Раунд #{t.last_round} завершен.\n"
-                    f"- Режим: **{preset_title}**\n"
-                    f"- Длительность: {m:02d}:{s:02d}\n"
-                    f"- Живых антагонистов: **{cur_antags}**\n"
-                    f"- Экипаж: {alive} выживших ({dead} погибших)\n"
-                    f"- Станция уходит на рестарт в лобби."
-                )
-                t.last_antag_count = 0
-                t.last_ghost_roles_count = 0
-                t.current_preset = None
+                if not t.corvax_round_ended:
+                    is_round_ended = True
 
-        # 3. LOBBY T-15 GAME RULE / PRESET DETECTION
-        secret_data = await prom_query(prom_url, self.session, f"secret_preset_selected{{job='{job}'}}")
-        for sp in secret_data:
-            preset = sp.get("metric", {}).get("preset")
-            count = int(sp["value"][1])
-            prev_cnt = t.known_secret_presets.get(preset, count)
-            if count > prev_cnt:
-                t.known_secret_presets[preset] = count
-                t.current_preset = preset
-                preset_title = PRESET_NAMES.get(preset, preset)
-                rules_text = format_rules_stack(preset)
-                await self.notify_channel(channel, 
-                    f"**[{job.upper()}]** В лобби утвержден список геймрулов (до старта 15 сек):\n"
-                    f"Режим: **{preset_title}**\n"
-                    f"Геймрулы раунда:\n{rules_text}"
-                )
-            elif preset not in t.known_secret_presets:
-                t.known_secret_presets[preset] = count
-
-        # 4. NEW ROUND START NOTIFICATION
-        if cur_round and t.last_round is not None and cur_round != t.last_round:
-            preset_name = t.current_preset or await fetch_server_preset(job, self.session) or "Greenshift"
-            t.current_preset = preset_name
-            preset_title = PRESET_NAMES.get(preset_name, preset_name)
-            rules_text = format_rules_stack(preset_name)
-            await self.notify_channel(channel, 
-                f"**[{job.upper()}]** Раунд #{cur_round} начался.\n"
-                f"Режим: **{preset_title}**\n"
-                f"Активные геймрулы:\n{rules_text}"
+        if is_round_ended:
+            t.corvax_round_ended = True
+            m, s = divmod(t.last_round_length or round_len, 60)
+            len_str = f"{m} мин {s:02d} сек"
+            round_disp = status_round_id or cur_round or t.last_round or "?"
+            map_disp = status_map or t.corvax_map or "Станция"
+            await self.notify_channel(
+                channel,
+                f"**[{tag}] Раунд #{round_disp} завершен. Длительность: {len_str} | Карта: {map_disp}**",
+                is_critical=True
             )
+            t.last_antag_count = 0
+            t.last_ghost_roles_count = 0
+            t.current_preset = None
+
+        # 4. LOBBY DETECTION & CLEANUP
+        if run_level == 0 and t.corvax_last_run_level != 0:
+            await self.notify_channel(
+                channel,
+                f"**[{tag}] Сервер перезапустился в лобби.**",
+                is_critical=True
+            )
+            if not t.corvax_lobby_purged:
+                t.corvax_lobby_purged = True
+                await self.purge_round_messages(t, channel)
+
+        # 5. NEW ROUND START DETECTION
+        is_round_started = False
+        if t.corvax_last_run_level in (0, 2) and run_level == 1:
+            is_round_started = True
+        elif cur_round is not None and t.last_round is not None and str(cur_round) != str(t.last_round) and run_level != 0:
+            is_round_started = True
+
+        if is_round_started:
+            t.corvax_round_ended = False
+            t.corvax_lobby_purged = False
+            await self.purge_round_messages(t, channel)
+
             t.known_storyteller_events.clear()
             t.known_random_events.clear()
             t.known_antag_objectives.clear()
@@ -1434,16 +1464,48 @@ class TelemetryBot(commands.Bot):
             t.cargo_cache.clear()
             t.last_antag_count = None
             t.last_ghost_roles_count = None
+
+            preset_name = status_preset or t.current_preset or await fetch_server_preset(job, self.session) or "Secret"
+            if preset_name == "Мирный":
+                preset_name = "Greenshift"
+            elif preset_name == "Динамик":
+                preset_name = "Dynamic"
+            elif preset_name == "Секрет":
+                preset_name = "Secret"
+            t.current_preset = preset_name
+            preset_title = PRESET_NAMES.get(preset_name, preset_name)
+
+            round_disp = status_round_id or cur_round or "?"
+            map_disp = status_map or t.corvax_map or "Станция"
+            online_disp = status_players or alive or "?"
+
+            await self.notify_channel(
+                channel,
+                f"**[{tag}] Раунд #{round_disp} начался. Режим: {preset_title} | Карта: {map_disp} | Онлайн: {online_disp}**",
+                is_critical=True
+            )
+
         t.last_round = cur_round
         t.last_round_length = round_len
+        t.corvax_last_run_level = run_level
+        if status_round_id:
+            t.corvax_last_round_id = status_round_id
+        if status_map:
+            t.corvax_map = status_map
+        if status_preset:
+            t.corvax_preset = status_preset
 
-        # 5. STORYTELLER TRIGGERED GAMERULES & GHOST ANTAGS
+        # 6. STORYTELLER TRIGGERED GAMERULES & GHOST ANTAGS
         st_data = await prom_query(prom_url, self.session, f"ss14_storyteller_events_triggered_total{{job='{job}'}}")
         for ev in st_data:
             eid = ev.get("metric", {}).get("event_id")
             count = int(ev["value"][1])
             prev_cnt = t.known_storyteller_events.get(eid, count)
 
+            if eid == "GreytideVirus":
+                t.known_storyteller_events[eid] = count
+                continue
+
             if count > prev_cnt:
                 diff = count - prev_cnt
                 t.known_storyteller_events[eid] = count
@@ -1451,31 +1513,45 @@ class TelemetryBot(commands.Bot):
                 if eid in GHOST_ROLE_EVENTS:
                     role_name = GHOST_ROLE_EVENTS[eid]
                     t.recent_ghost_antags.append(role_name)
-                    await self.notify_channel(channel, 
-                        f"**[{job.upper()}]** В гостах (F7) заспавнился антагонист: **{role_name}** (+{diff}).\n"
-                        f"Живых антагонистов на станции: **{cur_antags}**."
+                    await self.notify_channel(
+                        channel, 
+                        f"**[{tag}] В гостах (F7) заспавнился антагонист: {role_name} (+{diff}).**",
+                        is_critical=True
                     )
                 elif eid in MIDROUND_ANTAG_EVENTS:
                     m_name = MIDROUND_ANTAG_EVENTS[eid]
-                    await self.notify_channel(channel, 
-                        f"**[{job.upper()}]** Запущен геймрул антагонистов: **{m_name}** (+{diff}).\n"
-                        f"Живых антагонистов на станции: **{cur_antags}**."
+                    await self.notify_channel(
+                        channel, 
+                        f"**[{tag}] Событие антагонистов: {m_name} (+{diff}).**",
+                        is_critical=True
                     )
                 elif eid in DISASTER_EVENTS:
                     d_name = DISASTER_EVENTS[eid]
-                    await self.notify_channel(channel, f"**[{job.upper()}]** Событие станции: **{d_name}** (+{diff}).")
+                    await self.notify_channel(
+                        channel, 
+                        f"**[{tag}] Событие станции: {d_name} (+{diff}).**",
+                        is_critical=True
+                    )
                 else:
-                    await self.notify_channel(channel, f"**[{job.upper()}]** Запущен геймрул сторителлера: **{eid}** (+{diff}).")
+                    await self.notify_channel(
+                        channel, 
+                        f"**[{tag}] Запущен геймрул сторителлера: {eid} (+{diff}).**",
+                        is_critical=True
+                    )
             elif eid not in t.known_storyteller_events:
                 t.known_storyteller_events[eid] = count
 
-        # 6. RANDOM EVENT ADDED
+        # 7. RANDOM EVENT ADDED
         rnd_data = await prom_query(prom_url, self.session, f"random_event_added{{job='{job}'}}")
         for ev in rnd_data:
             eid = ev.get("metric", {}).get("event")
             count = int(ev["value"][1])
             prev_cnt = t.known_random_events.get(eid, count)
 
+            if eid == "GreytideVirus":
+                t.known_random_events[eid] = count
+                continue
+
             if count > prev_cnt:
                 diff = count - prev_cnt
                 t.known_random_events[eid] = count
@@ -1483,30 +1559,43 @@ class TelemetryBot(commands.Bot):
                 if eid in GHOST_ROLE_EVENTS:
                     role_name = GHOST_ROLE_EVENTS[eid]
                     t.recent_ghost_antags.append(role_name)
-                    await self.notify_channel(channel, 
-                        f"**[{job.upper()}]** В гостах (F7) заспавнился антагонист: **{role_name}** (+{diff}).\n"
-                        f"Живых антагонистов на станции: **{cur_antags}**."
+                    await self.notify_channel(
+                        channel, 
+                        f"**[{tag}] В гостах (F7) заспавнился антагонист: {role_name} (+{diff}).**",
+                        is_critical=True
                     )
                 elif eid in DISASTER_EVENTS:
                     d_name = DISASTER_EVENTS[eid]
-                    await self.notify_channel(channel, f"**[{job.upper()}]** Событие станции: **{d_name}** (+{diff}).")
+                    await self.notify_channel(
+                        channel, 
+                        f"**[{tag}] Событие станции: {d_name} (+{diff}).**",
+                        is_critical=True
+                    )
                 elif eid in MIDROUND_ANTAG_EVENTS:
                     m_name = MIDROUND_ANTAG_EVENTS[eid]
-                    await self.notify_channel(channel, f"**[{job.upper()}]** Событие антагонистов: **{m_name}** (+{diff}).")
+                    await self.notify_channel(
+                        channel, 
+                        f"**[{tag}] Событие антагонистов: {m_name} (+{diff}).**",
+                        is_critical=True
+                    )
             elif eid not in t.known_random_events:
                 t.known_random_events[eid] = count
 
-        # 7. TOTAL GHOST ROLES POOL DELTA
+        # 8. TOTAL GHOST ROLES POOL DELTA
         ghost_res = await prom_query(prom_url, self.session, f"ss14_storyteller_available_ghost_roles{{job='{job}'}}")
         if ghost_res:
             cur_ghost = int(ghost_res[0]["value"][1])
             if t.last_ghost_roles_count is not None and cur_ghost > t.last_ghost_roles_count:
                 diff = cur_ghost - t.last_ghost_roles_count
                 if round_len > 40:
-                    await self.notify_channel(channel, f"**[{job.upper()}]** Пул гост-ролей пополнился: +{diff} (всего в F7: **{cur_ghost}**).")
+                    await self.notify_channel(
+                        channel, 
+                        f"**[{tag}] Пул гост-ролей пополнился: +{diff} (всего в F7: {cur_ghost}).**",
+                        is_critical=True
+                    )
             t.last_ghost_roles_count = cur_ghost
 
-        # 8. EXACT LIVE ANTAGONIST PLAYER COUNT DELTA & ROLE CORRELATION
+        # 9. EXACT LIVE ANTAGONIST PLAYER COUNT DELTA & ROLE CORRELATION
         newly_assigned_roles = []
         obj_data = await prom_query(prom_url, self.session, f"ss14_antag_objectives_all_total{{job='{job}'}}")
         for o in obj_data:
@@ -1525,128 +1614,57 @@ class TelemetryBot(commands.Bot):
                 diff = cur_antags - t.last_antag_count
                 if newly_assigned_roles:
                     roles_str = ", ".join(newly_assigned_roles)
-                    await self.notify_channel(channel, 
-                        f"**[{job.upper()}]** На станции появился антагонист: **{roles_str}** (+{diff}). Всего активных: **{cur_antags}**."
+                    await self.notify_channel(
+                        channel, 
+                        f"**[{tag}] На станции появился антагонист: {roles_str} (+{diff}). Всего активных: {cur_antags}.**",
+                        is_critical=True
                     )
                 elif t.recent_ghost_antags:
                     claimed_role = t.recent_ghost_antags.pop(0)
-                    await self.notify_channel(channel, 
-                        f"**[{job.upper()}]** Игрок взял гост-роль антагониста: **{claimed_role}** (+{diff}). Всего активных: **{cur_antags}**."
+                    await self.notify_channel(
+                        channel, 
+                        f"**[{tag}] Игрок взял гост-роль антагониста: {claimed_role} (+{diff}). Всего активных: {cur_antags}.**",
+                        is_critical=True
                     )
                 else:
                     preset_role = PRESET_ANTAG_NAMES.get(t.current_preset, f"Антагонист ({t.current_preset or 'Режим'})")
-                    await self.notify_channel(channel, 
-                        f"**[{job.upper()}]** На станции активен антагонист: **{preset_role}** (+{diff}). Всего активных: **{cur_antags}**."
+                    await self.notify_channel(
+                        channel, 
+                        f"**[{tag}] На станции активен антагонист: {preset_role} (+{diff}). Всего активных: {cur_antags}.**",
+                        is_critical=True
                     )
             elif cur_antags < t.last_antag_count and round_len > 40:
                 diff = t.last_antag_count - cur_antags
                 preset_role = PRESET_ANTAG_NAMES.get(t.current_preset, "антагонист")
-                await self.notify_channel(channel, f"**[{job.upper()}]** Минус {diff} антагонист ({preset_role}: погиб или ушел в ССД). Живых на станции: **{cur_antags}**.")
+                await self.notify_channel(
+                    channel, 
+                    f"**[{tag}] Минус {diff} антагонист ({preset_role}: погиб или ушел в ССД). Живых на станции: {cur_antags}.**",
+                    is_critical=True
+                )
             elif newly_assigned_roles:
                 roles_str = ", ".join(newly_assigned_roles)
-                await self.notify_channel(channel, 
-                    f"**[{job.upper()}]** Экипаж получил скрытую роль антагониста: **{roles_str}**. Выданы боевые цели."
+                await self.notify_channel(
+                    channel, 
+                    f"**[{tag}] Экипаж получил скрытую роль антагониста: {roles_str}. Выданы боевые цели.**",
+                    is_critical=True
                 )
         t.last_antag_count = cur_antags
 
-        # 9. ADMIN COVERAGE & DEADMINNED RADAR
-        if t.last_active_admins is not None:
-            if active_admins == 0 and t.last_active_admins > 0:
-                await self.notify_channel(channel, 
-                    f"**[{job.upper()}]** Внимание: на сервере не осталось активных админов (0 активных, {deadminned_admins} деадмин). Надзор отсутствует."
-                )
-            elif active_admins > 0 and t.last_active_admins == 0:
-                await self.notify_channel(channel, 
-                    f"**[{job.upper()}]** Внимание: на сервере появился активный админ (активных: {active_admins}). Возобновлен надзор."
-                )
-        t.last_active_admins = active_admins
-
-        if t.last_deadminned_admins is not None:
-            if deadminned_admins > t.last_deadminned_admins:
-                diff = deadminned_admins - t.last_deadminned_admins
-                await self.notify_channel(channel, 
-                    f"**[{job.upper()}]** В игру зашел скрытый админ (+{diff} деадмин). Всего скрытых под прикрытием: **{deadminned_admins}**."
-                )
-            elif deadminned_admins < t.last_deadminned_admins:
-                diff = t.last_deadminned_admins - deadminned_admins
-                await self.notify_channel(channel, 
-                    f"**[{job.upper()}]** Скрытый админ покинул игру или включил плашку (-{diff}). Скрытых под прикрытием: **{deadminned_admins}**."
-                )
-        t.last_deadminned_admins = deadminned_admins
-
-        # 10. AI Director Pacing State
-        pacing_data = await prom_query(prom_url, self.session, f"ss14_storyteller_pacing_state{{job='{job}'}}")
-        if pacing_data:
-            cur_pacing = int(pacing_data[0]["value"][1])
-            if cur_pacing != t.last_pacing:
-                if cur_pacing == 2 and t.last_pacing is not None:
-                    await self.notify_channel(channel, f"**[{job.upper()}]** Сторителлер перешел в фазу пика угроз (PEAK).")
-                t.last_pacing = cur_pacing
-
-        # 11. Alert Level Escalation
+        # 10. Alert Level Escalation
         alert_data = await prom_query(prom_url, self.session, f"ss14_storyteller_alert_level{{job='{job}'}}")
         if alert_data:
             cur_alert = int(alert_data[0]["value"][1])
             if cur_alert != t.last_alert:
                 if cur_alert >= 3 and t.last_alert is not None:
                     name = ALERT_MAP.get(cur_alert, f"Уровень {cur_alert}")
-                    await self.notify_channel(channel, f"**[{job.upper()}]** На станции объявлен **{name}** код тревоги.")
+                    await self.notify_channel(
+                        channel, 
+                        f"**[{tag}] На станции объявлен {name} код тревоги.**",
+                        is_critical=True
+                    )
                 t.last_alert = cur_alert
 
-        # 12. Cargo Weapons / Ammo Shipments
-        cargo = await prom_query(prom_url, self.session, f"ss14_cargo_order_fulfilled_total{{job='{job}', product_id=~'Armory.*'}}")
-        for c in cargo:
-            pid = c.get("metric", {}).get("product_id")
-            num = int(c["value"][1])
-            if pid not in t.cargo_cache:
-                t.cargo_cache[pid] = num
-            elif num > t.cargo_cache[pid]:
-                diff = num - t.cargo_cache[pid]
-                t.cargo_cache[pid] = num
-                await self.notify_channel(channel, f"**[{job.upper()}]** В карго прибыло вооружение для СБ: **{pid}** (+{diff} шт.).")
-
-        # 13. ANTAG CURRENCY SPENT IN REAL-TIME
-        curr_data = await prom_query(prom_url, self.session, f"ss14_store_currency_spent_total{{job='{job}'}}")
-        for c in curr_data:
-            curr = c.get("metric", {}).get("currency")
-            val = int(c["value"][1])
-            prev = t.known_currency_spent.get(curr, val)
-            if val > prev and round_len > 40:
-                diff = val - prev
-                t.known_currency_spent[curr] = val
-                if curr == "Telecrystal":
-                    await self.notify_channel(channel, f"**[{job.upper()}]** Аплинк Синдиката активен: потрачено **+{diff} ТК** (закупка оружия/снаряжения).")
-                elif curr == "WizCoin":
-                    await self.notify_channel(channel, f"**[{job.upper()}]** Маг совершил покупку в спеллбуке: потрачено **+{diff} монет**.")
-                elif curr == "StolenEssence":
-                    await self.notify_channel(channel, f"**[{job.upper()}]** Вампир прокачал способность за кровь: потрачено **+{diff} эссенции**.")
-                elif curr == "ChangelingDNA":
-                    await self.notify_channel(channel, f"**[{job.upper()}]** Генокрад мутировал: потрачено **+{diff} очков ДНК**.")
-                elif curr == "SiliconMemory":
-                    await self.notify_channel(channel, f"**[{job.upper()}]** Взломанный борговский модуль: потрачено **+{diff} памяти**.")
-                elif curr == "Bluecrystal":
-                    await self.notify_channel(channel, f"**[{job.upper()}]** Вор приобрел снаряжение: потрачено **+{diff} кристаллов**.")
-            elif curr not in t.known_currency_spent:
-                t.known_currency_spent[curr] = val
-
-        # 14. COMMAND CASUALTIES & ERT (ОБР)
-        dead_cmd_res = await prom_query(prom_url, self.session, f"ss14_storyteller_dead_command_count{{job='{job}'}}")
-        if dead_cmd_res:
-            cur_dead_cmd = int(dead_cmd_res[0]["value"][1])
-            if t.last_dead_command is not None and cur_dead_cmd > t.last_dead_command and round_len > 40:
-                diff = cur_dead_cmd - t.last_dead_command
-                await self.notify_channel(channel, f"**[{job.upper()}]** Погиб офицер командования станции (+{diff}). Всего погибших глав: **{cur_dead_cmd}**.")
-            t.last_dead_command = cur_dead_cmd
-
-        ert_res = await prom_query(prom_url, self.session, f"ss14_storyteller_active_ert_count{{job='{job}'}}")
-        if ert_res:
-            cur_ert = int(ert_res[0]["value"][1])
-            if t.last_ert_count is not None and cur_ert > t.last_ert_count and round_len > 40:
-                diff = cur_ert - t.last_ert_count
-                await self.notify_channel(channel, f"**[{job.upper()}]** На станцию прибыл отряд быстрого реагирования (ОБР / ERT: **+{diff}** бойцов)!")
-            t.last_ert_count = cur_ert
-
-        # 15. CONTAINMENT BREACH (TESLA / SINGULO)
+        # 11. Supermatter / Tesla / Singularity Critical Breaches
         t_active = await prom_query(prom_url, self.session, f"ss14_storyteller_tesla_active{{job='{job}'}}")
         t_cont = await prom_query(prom_url, self.session, f"ss14_storyteller_tesla_contained{{job='{job}'}}")
         if t_active and t_cont:
@@ -1654,7 +1672,11 @@ class TelemetryBot(commands.Bot):
             is_cont = t_cont[0]["value"][1] == "1"
             if is_active and not is_cont and not t.last_tesla_breach:
                 t.last_tesla_breach = True
-                await self.notify_channel(channel, f"**[{job.upper()}]** Критическая авария: Тесла сорвалась с контейнмента и движется по станции!")
+                await self.notify_channel(
+                    channel, 
+                    f"**[{tag}] Критическая авария: Тесла сорвалась с контейнмента и движется по станции!**",
+                    is_critical=True
+                )
             elif is_cont:
                 t.last_tesla_breach = False
 
@@ -1665,23 +1687,16 @@ class TelemetryBot(commands.Bot):
             is_cont = s_cont[0]["value"][1] == "1"
             if is_active and not is_cont and not t.last_singulo_breach:
                 t.last_singulo_breach = True
-                await self.notify_channel(channel, f"**[{job.upper()}]** Критическая авария: Сингулярность сорвалась с привязи и пожирает станцию!")
+                await self.notify_channel(
+                    channel, 
+                    f"**[{tag}] Критическая авария: Сингулярность сорвалась с привязи и пожирает станцию!**",
+                    is_critical=True
+                )
             elif is_cont:
                 t.last_singulo_breach = False
 
-        # Live Dashboard Update (Lust Station)
-        status_map = "?"
-        status_preset = None
-        try:
-            async with self.session.get(f"https://server.ss14.org/{job}/status", timeout=aiohttp.ClientTimeout(total=2)) as resp:
-                if resp.status == 200:
-                    st_json = await resp.json()
-                    status_map = st_json.get("map", "?")
-                    status_preset = st_json.get("preset")
-        except Exception:
-            pass
-
-        preset_name = t.current_preset or status_preset
+        # Live Dashboard Update
+        preset_name = t.current_preset or status_preset or "Dynamic"
         if preset_name == "Мирный":
             preset_name = "Greenshift"
         elif preset_name == "Динамик":
@@ -1721,7 +1736,7 @@ class TelemetryBot(commands.Bot):
 
         m, s = divmod(round_len, 60)
         len_str = f"{m} мин {s:02d} сек" if round_len > 0 else "0 мин 00 сек"
-        round_id_str = f"#{cur_round}" if cur_round else "?"
+        round_id_str = f"#{status_round_id or cur_round}" if (status_round_id or cur_round) else "?"
 
         raw_corvax_rules = list(PRESET_RULES.get(preset_name, [preset_name, "BasicStationEventScheduler", "BasicRoundstartVariation"]))
         rules_list = []
@@ -1733,12 +1748,12 @@ class TelemetryBot(commands.Bot):
 
         embed = make_dashboard_embed(
             title=("РЫБЬЯ СТАНЦИЯ: ПЕРСЕЙ" if job in ("perseus", "persey") else f"CORVAX: {job.upper()}"),
-            status_label="В игре",
-            color=0x2ecc71,
+            status_label="В игре" if run_level != 0 else "В лобби",
+            color=0x2ecc71 if run_level != 0 else 0x95a5a6,
             players=f"{alive}/{int(alive)+int(dead)}" if str(alive).isdigit() and str(dead).isdigit() else str(alive),
             round_len_str=len_str,
             round_id_str=round_id_str,
-            map_name=status_map,
+            map_name=status_map or t.corvax_map or "?",
             preset_title=preset_title,
             admins_str=f"{active_admins} активных / {deadminned_admins} скрытых",
             ghosts_str=f"{ghost_count} мест в F7",
@@ -1876,14 +1891,20 @@ class TelemetryBot(commands.Bot):
                 t.goob_evac_called = True
                 t.goob_evac_docked = False
                 t.goob_evac_call_time = round_len
-                await self.notify_channel(
+                t.goob_evac_msg = await self.notify_channel(
                     channel,
                     f"**[{tag}] Вызван эвакуационный шаттл. Расчетное время прибытия: 10 минут.**",
                     is_critical=True
                 )
             elif t.goob_evac_called and not t.goob_evac_docked and t.goob_evac_call_time > 0 and (round_len - t.goob_evac_call_time >= 600):
                 t.goob_evac_docked = True
-                await self.notify_channel(
+                if t.goob_evac_msg:
+                    try:
+                        await t.goob_evac_msg.delete()
+                    except Exception:
+                        pass
+                    t.goob_evac_msg = None
+                t.goob_evac_msg = await self.notify_channel(
                     channel,
                     f"**[{tag}] Эвакуационный шаттл пристыковался к станции. До отлета 3 минуты.**",
                     is_critical=True
@@ -1892,6 +1913,12 @@ class TelemetryBot(commands.Bot):
             t.goob_evac_called = False
             t.goob_evac_docked = False
             t.goob_evac_call_time = 0
+            if t.goob_evac_msg:
+                try:
+                    await t.goob_evac_msg.delete()
+                except Exception:
+                    pass
+                t.goob_evac_msg = None
             await self.notify_channel(
                 channel,
                 f"**[{tag}] Отзыв эвакуации: вызов эвакуационного шаттла отменен.**",
@@ -1958,6 +1985,7 @@ class TelemetryBot(commands.Bot):
             t.goob_evac_called = False
             t.goob_evac_docked = False
             t.goob_evac_call_time = 0
+            t.goob_evac_msg = None
             t.goob_lobby_purged = False
             t.last_round = cur_round
             t.goob_last_round_num = cur_round
