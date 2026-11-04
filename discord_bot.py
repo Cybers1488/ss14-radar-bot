@@ -1867,25 +1867,16 @@ class TelemetryBot(commands.Bot):
         if run_level == 1 and beat == "Denouement":
             if not t.goob_evac_called and round_len > 30:
                 t.goob_evac_called = True
-                t.goob_evac_call_time = round_len
                 await self.notify_channel(
                     channel,
                     f"**[{tag}] Вызван эвакуационный шаттл. Фаза завершения раунда (Denouement).**",
                     is_critical=True
                 )
-            elif t.goob_evac_called and not t.goob_evac_docked and (round_len - t.goob_evac_call_time >= 300):
-                t.goob_evac_docked = True
-                await self.notify_channel(
-                    channel,
-                    f"**[{tag}] Эвакуационный шаттл пристыковался к станции. До отлета 3 минуты.**",
-                    is_critical=True
-                )
         elif t.goob_evac_called and beat != "Denouement" and run_level == 1:
             t.goob_evac_called = False
-            t.goob_evac_docked = False
             await self.notify_channel(
                 channel,
-                f"**[{tag}] Отзыв эвакуации: вызов шаттла отменен.**",
+                f"**[{tag}] Отзыв эвакуации: вызов эвакуационного шаттла отменен.**",
                 is_critical=True
             )
 
