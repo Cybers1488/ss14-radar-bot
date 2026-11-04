@@ -1732,7 +1732,7 @@ class TelemetryBot(commands.Bot):
         footer_text = f"Экипаж: {alive} живых / {dead} мертвых"
 
         embed = make_dashboard_embed(
-            title=f"LUST STATION: {job.upper()}",
+            title=("РЫБЬЯ СТАНЦИЯ: ПЕРСЕЙ" if job in ("perseus", "persey") else f"CORVAX: {job.upper()}"),
             status_label="В игре",
             color=0x2ecc71,
             players=f"{alive}/{int(alive)+int(dead)}" if str(alive).isdigit() and str(dead).isdigit() else str(alive),
@@ -2447,6 +2447,8 @@ def resolve_server(interaction: discord.Interaction, passed_server: str = None) 
             return "goob-basileus"
         if s in ("adventure", "adventure_time"):
             return "vp"
+        if s in ("persey", "perseus", "fish", "fish-station", "fish_station"):
+            return "perseus"
         if s in ("spectral", "venus", "perseus", "invicta", "astra", "fenix", "fire", "vp"):
             return s
     for s_name, ch_id in bot.cfg.get("server_channels", {}).items():
