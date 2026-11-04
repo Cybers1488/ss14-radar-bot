@@ -1857,6 +1857,10 @@ class TelemetryBot(commands.Bot):
                 t.rule_spawn_times[r] = "00:00"
             for r in GOOB_PRESETS.get(preset, {}).get("rules", []):
                 t.rule_spawn_times[r] = "00:00"
+            if beat == "Denouement":
+                t.goob_evac_called = True
+                t.goob_evac_docked = True
+                t.goob_evac_call_time = round_len
             t.initialized = True
             return
 
@@ -1867,13 +1871,24 @@ class TelemetryBot(commands.Bot):
         if run_level == 1 and beat == "Denouement":
             if not t.goob_evac_called and round_len > 30:
                 t.goob_evac_called = True
+                t.goob_evac_docked = False
+                t.goob_evac_call_time = round_len
                 await self.notify_channel(
                     channel,
-                    f"**[{tag}] Вызван эвакуационный шаттл. Фаза завершения раунда (Denouement).**",
+                    f"**[{tag}] Вызван эвакуационный шаттл. Расчетное время прибытия: 10 минут.**",
+                    is_critical=True
+                )
+            elif t.goob_evac_called and not t.goob_evac_docked and t.goob_evac_call_time > 0 and (round_len - t.goob_evac_call_time >= 600):
+                t.goob_evac_docked = True
+                await self.notify_channel(
+                    channel,
+                    f"**[{tag}] Эвакуационный шаттл пристыковался к станции. До отлета 3 минуты.**",
                     is_critical=True
                 )
         elif t.goob_evac_called and beat != "Denouement" and run_level == 1:
             t.goob_evac_called = False
+            t.goob_evac_docked = False
+            t.goob_evac_call_time = 0
             await self.notify_channel(
                 channel,
                 f"**[{tag}] Отзыв эвакуации: вызов эвакуационного шаттла отменен.**",
@@ -1898,6 +1913,7 @@ class TelemetryBot(commands.Bot):
             t.goob_midround_rules.clear()
             t.goob_gamerules_announced.clear()
             t.goob_physical_spawns_announced.clear()
+            t.goob_evac_call_time = 0
             # Do NOT reset evac flags here; they are reset only on is_round_started so evac doesn't re-trigger in post-round
             end_num = t.goob_last_round_num or cur_round
             end_id = t.goob_last_round_id or round_id
@@ -1938,6 +1954,7 @@ class TelemetryBot(commands.Bot):
             t.goob_round_ended = False
             t.goob_evac_called = False
             t.goob_evac_docked = False
+            t.goob_evac_call_time = 0
             t.goob_lobby_purged = False
             t.last_round = cur_round
             t.goob_last_round_num = cur_round
