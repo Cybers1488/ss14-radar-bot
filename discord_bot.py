@@ -1324,7 +1324,15 @@ class TelemetryBot(commands.Bot):
         status_map = status_data.get("map")
         status_round_id = status_data.get("round_id")
         status_players = status_data.get("players")
+        status_soft_max = status_data.get("soft_max_players")
         status_preset = status_data.get("preset")
+
+        # Accurate connected player count
+        prom_p_res = await prom_query(prom_url, self.session, f"robust_player_count{{job='{job}'}}")
+        prom_players = int(prom_p_res[0]["value"][1]) if prom_p_res else None
+        real_players = status_players if status_players is not None else (prom_players if prom_players is not None else 0)
+        soft_max = status_soft_max or 125
+        players_display = f"{real_players}/{soft_max}" if soft_max else str(real_players)
 
         # 1. Round State & Length
         round_data = await prom_query(prom_url, self.session, f"ss14_round_number{{job='{job}'}}")
@@ -1477,7 +1485,7 @@ class TelemetryBot(commands.Bot):
 
             round_disp = status_round_id or cur_round or "?"
             map_disp = status_map or t.corvax_map or "Станция"
-            online_disp = status_players or alive or "?"
+            online_disp = real_players
 
             await self.notify_channel(
                 channel,
@@ -1744,13 +1752,13 @@ class TelemetryBot(commands.Bot):
             if r not in t.rule_spawn_times:
                 t.rule_spawn_times[r] = "00:00"
             rules_list.append(format_rule_entry(r, t.rule_spawn_times.get(r, "00:00")))
-        footer_text = f"Экипаж: {alive} живых / {dead} мертвых"
+        footer_text = f"Экипаж: {alive} живых / {dead} мертвых" if (str(alive).isdigit() and int(alive) > 0) else f"Онлайн: {real_players} игроков"
 
         embed = make_dashboard_embed(
             title=("РЫБЬЯ СТАНЦИЯ: ПЕРСЕЙ" if job in ("perseus", "persey") else f"CORVAX: {job.upper()}"),
             status_label="В игре" if run_level != 0 else "В лобби",
             color=0x2ecc71 if run_level != 0 else 0x95a5a6,
-            players=f"{alive}/{int(alive)+int(dead)}" if str(alive).isdigit() and str(dead).isdigit() else str(alive),
+            players=players_display,
             round_len_str=len_str,
             round_id_str=round_id_str,
             map_name=status_map or t.corvax_map or "?",
