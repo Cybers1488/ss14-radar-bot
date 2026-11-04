@@ -287,6 +287,7 @@ ANTAG_ROLE_NAMES = {
     "LoneAbductorSpawn": "Одинокий абдуктор (LoneAbductor)",
     "LoneAbductorAntag": "Одинокий абдуктор (LoneAbductor)",
     "DuoAbductorSpawn": "Абдукторы (DuoAbductors)",
+    "AbductorVictim": "Подопытный абдукторов (AbductorVictim)",
     "AbductorsSpawn": "Абдукторы (Abductors)",
     "Abductor": "Абдуктор (Abductor)",
     "SlasherSpawn": "Слэшер (Мясник)",
@@ -601,6 +602,8 @@ def is_major_antag(rule: str) -> bool:
     if not rule:
         return False
     low = str(rule).lower()
+    if "victim" in low:
+        return False
     return any(k in low for k in MAJOR_ANTAG_KEYWORDS)
 
 
