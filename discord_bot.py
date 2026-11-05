@@ -1421,7 +1421,7 @@ class TelemetryBot(commands.Bot):
 
         # 3. ROUND END DETECTION
         is_round_ended = False
-        if t.corvax_last_run_level == 1 and run_level == 2 and not t.corvax_round_ended:
+        if t.corvax_last_run_level == 1 and run_level in (0, 2) and not t.corvax_round_ended:
             is_round_ended = True
 
         for g in gm_rounds_data:
@@ -1450,14 +1450,14 @@ class TelemetryBot(commands.Bot):
 
         # 4. LOBBY DETECTION & CLEANUP
         if run_level == 0 and t.corvax_last_run_level != 0:
+            if not t.corvax_lobby_purged:
+                t.corvax_lobby_purged = True
+                await self.purge_round_messages(t, channel)
             await self.notify_channel(
                 channel,
                 f"**[{tag}] Сервер перезапустился в лобби.**",
                 is_critical=True
             )
-            if not t.corvax_lobby_purged:
-                t.corvax_lobby_purged = True
-                await self.purge_round_messages(t, channel)
 
         # 5. NEW ROUND START DETECTION
         is_round_started = False
@@ -1803,13 +1803,13 @@ class TelemetryBot(commands.Bot):
 
         raw_metrics = ""
         try:
-            async with self.session.get(metrics_url, timeout=6, ssl=False) as resp:
+            async with self.session.get(metrics_url, timeout=aiohttp.ClientTimeout(total=5), ssl=False) as resp:
                 if resp.status == 200:
                     raw_metrics = await resp.text()
         except Exception:
-            return
+            pass
 
-        if not raw_metrics:
+        if not raw_metrics and not status_data:
             return
 
         cur_round = None
@@ -1951,7 +1951,7 @@ class TelemetryBot(commands.Bot):
         # 1. ROUND END DETECTION
         # -------------------------------------------------------------
         is_round_ended = False
-        if t.goob_last_run_level == 1 and run_level == 2 and not t.goob_round_ended:
+        if t.goob_last_run_level == 1 and run_level in (0, 2) and not t.goob_round_ended:
             is_round_ended = True
         elif cur_round is not None and t.goob_last_round_num is not None and cur_round != t.goob_last_round_num and not t.goob_round_ended and (t.goob_last_round_len > 120 or round_len > 120):
             is_round_ended = True
@@ -1983,14 +1983,14 @@ class TelemetryBot(commands.Bot):
         # 2. LOBBY & ROUND START DETECTION
         # -------------------------------------------------------------
         if run_level == 0 and t.goob_last_run_level != 0:
+            if not t.goob_lobby_purged:
+                t.goob_lobby_purged = True
+                await self.purge_round_messages(t, channel)
             await self.notify_channel(
                 channel,
                 f"**[{tag}] Сервер перезапустился в лобби.**",
                 is_critical=True
             )
-            if not t.goob_lobby_purged:
-                t.goob_lobby_purged = True
-                await self.purge_round_messages(t, channel)
 
         is_round_started = False
         if t.goob_last_run_level in (0, 2) and run_level == 1:
@@ -2359,7 +2359,7 @@ class TelemetryBot(commands.Bot):
 
         # 1. ROUND END DETECTION
         is_round_ended = False
-        if t.cg_last_run_level == 1 and run_level == 2 and not t.cg_round_ended:
+        if t.cg_last_run_level == 1 and run_level in (0, 2) and not t.cg_round_ended:
             is_round_ended = True
         elif round_id is not None and t.cg_last_round_id is not None and round_id != t.cg_last_round_id and not t.cg_round_ended:
             is_round_ended = True
@@ -2499,7 +2499,7 @@ class TelemetryBot(commands.Bot):
 
         # 1. Round End
         is_round_ended = False
-        if t.vp_last_run_level == 1 and run_level == 2 and not t.vp_round_ended:
+        if t.vp_last_run_level == 1 and run_level in (0, 2) and not t.vp_round_ended:
             is_round_ended = True
         elif cur_round is not None and t.vp_last_round_num is not None and cur_round != t.vp_last_round_num and not t.vp_round_ended and (t.vp_last_round_len > 120 or round_len > 120):
             is_round_ended = True
