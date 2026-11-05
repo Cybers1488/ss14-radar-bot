@@ -15,6 +15,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 import re
+from datetime import datetime, timezone
 
 if sys.platform == "win32":
     try:
@@ -1116,6 +1117,14 @@ class ServerTracker:
         self.corvax_map = None
         self.corvax_preset = None
 
+        # CorvaxGoob tracking
+        self.cg_last_run_level = None
+        self.cg_last_round_id = None
+        self.cg_round_ended = False
+        self.cg_lobby_purged = False
+        self.cg_map = None
+        self.cg_preset = None
+
         # Adventure Time (VP) tracking
         self.vp_last_run_level = None
         self.vp_last_round_id = None
@@ -1293,7 +1302,11 @@ class TelemetryBot(commands.Bot):
         prom_url = self.cfg.get("prometheus_url", "http://185.97.255.6:9090")
         for tracker in list(self.trackers.values()):
             try:
-                if tracker.name.startswith("goob"):
+                if tracker.name in ("corvaxgoob-void", "corvaxgoob_void", "void", "corvaxgoob"):
+                    await self.poll_corvaxgoob_server(tracker, "void")
+                elif tracker.name in ("corvaxgoob-lumen", "corvaxgoob_lumen", "lumen"):
+                    await self.poll_corvaxgoob_server(tracker, "lumen")
+                elif tracker.name.startswith("goob"):
                     await self.poll_goob_server(tracker)
                 elif tracker.name in ("vp", "adventure", "adventure_time"):
                     await self.poll_vp_server(tracker)
@@ -2485,7 +2498,11 @@ def resolve_server(interaction: discord.Interaction, passed_server: str = None) 
             return "vp"
         if s in ("persey", "perseus", "fish", "fish-station", "fish_station"):
             return "perseus"
-        if s in ("spectral", "venus", "perseus", "invicta", "astra", "fenix", "fire", "vp"):
+        if s in ("void", "corvaxgoob", "corvaxgoob-void", "corvaxgoob_void"):
+            return "corvaxgoob-void"
+        if s in ("lumen", "corvaxgoob-lumen", "corvaxgoob_lumen"):
+            return "corvaxgoob-lumen"
+        if s in ("spectral", "venus", "perseus", "invicta", "astra", "fenix", "fire", "vp", "corvaxgoob-void"):
             return s
     for s_name, ch_id in bot.cfg.get("server_channels", {}).items():
         if interaction.channel_id == ch_id:
@@ -2497,6 +2514,10 @@ def resolve_server(interaction: discord.Interaction, passed_server: str = None) 
 @app_commands.describe(server="Сервер для привязки (spectral, venus, goob-sigma, goob-basileus, vp)")
 async def cmd_setchannel(interaction: discord.Interaction, server: str = "spectral"):
     server = server.lower()
+    if server in ("void", "corvaxgoob", "corvaxgoob-void", "corvaxgoob_void"):
+        server = "corvaxgoob-void"
+    elif server in ("lumen", "corvaxgoob-lumen", "corvaxgoob_lumen"):
+        server = "corvaxgoob-lumen" 
     if "server_channels" not in bot.cfg:
         bot.cfg["server_channels"] = {}
     bot.cfg["server_channels"][server] = interaction.channel_id
