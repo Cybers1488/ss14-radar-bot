@@ -2283,6 +2283,148 @@ class TelemetryBot(commands.Bot):
         )
         await self.update_dashboard(t, channel, embed)
 
+    async def poll_corvaxgoob_server(self, t: ServerTracker, instance: str = "void"):
+        channel = await self.get_tracker_channel(t)
+        if not channel:
+            return
+
+        tag = f"CORVAXGOOB-{instance.upper()}"
+        status_url = f"https://game1.station14.ru/{instance}/server/status"
+        status_data = {}
+        try:
+            async with self.session.get(status_url, timeout=aiohttp.ClientTimeout(total=4), ssl=False) as resp:
+                if resp.status == 200:
+                    status_data = await resp.json()
+        except Exception:
+            pass
+
+        if not status_data:
+            return
+
+        run_level = status_data.get("run_level", 1)
+        round_id = status_data.get("round_id")
+        map_name = status_data.get("map", "Station")
+        preset = status_data.get("preset", "Секрет")
+        players = status_data.get("players", "?")
+        soft_max = status_data.get("soft_max_players", 90)
+        round_start = status_data.get("round_start_time")
+
+        round_len = 0
+        if round_start:
+            try:
+                st = round_start.replace("Z", "+00:00")
+                start_dt = datetime.fromisoformat(st)
+                now_dt = datetime.now(timezone.utc)
+                round_len = max(0, int((now_dt - start_dt).total_seconds()))
+            except Exception:
+                pass
+
+        m, s = divmod(round_len, 60)
+        len_str = f"{m} мин {s:02d} сек" if round_len > 0 else "0 мин 00 сек"
+
+        inst_label = "ВОЙД" if instance == "void" else instance.upper()
+        srv_title = f"CORVAXGOOB: {inst_label}"
+        status_label = "В игре" if run_level != 0 else "В лобби"
+        color = 0x2ecc71 if run_level != 0 else 0x95a5a6
+        players_display = f"{players}/{soft_max}" if soft_max else str(players)
+        round_id_str = f"#{round_id}" if round_id else "?"
+
+        if not t.initialized:
+            t.last_round = round_id
+            t.cg_last_round_id = round_id
+            t.cg_last_run_level = run_level
+            t.cg_map = map_name
+            t.cg_preset = preset
+            t.initialized = True
+
+            embed = make_dashboard_embed(
+                title=srv_title,
+                status_label=status_label,
+                color=color,
+                players=players_display,
+                round_len_str=len_str,
+                round_id_str=round_id_str,
+                map_name=map_name,
+                preset_title=preset,
+                admins_str="Метрики Prometheus закрыты хостом",
+                ghosts_str="Закрыты хостом",
+                antags_total_str="Закрыты хостом",
+                antags_roster_str="• Съем антагов недоступен (порт метрик закрыт хостом)",
+                rules_list=[preset, "BasicRoundstartVariation"],
+                footer_text=f"Онлайн: {players} игроков"
+            )
+            await self.update_dashboard(t, channel, embed)
+            return
+
+        # 1. ROUND END DETECTION
+        is_round_ended = False
+        if t.cg_last_run_level == 1 and run_level == 2 and not t.cg_round_ended:
+            is_round_ended = True
+        elif round_id is not None and t.cg_last_round_id is not None and round_id != t.cg_last_round_id and not t.cg_round_ended:
+            is_round_ended = True
+
+        if is_round_ended:
+            t.cg_round_ended = True
+            await self.notify_channel(
+                channel,
+                f"**[{tag}] Раунд #{t.cg_last_round_id or round_id} завершен. Длительность: {len_str} | Карта: {t.cg_map or map_name}**",
+                is_critical=True
+            )
+
+        # 2. LOBBY DETECTION & CLEANUP
+        if run_level == 0 and t.cg_last_run_level != 0:
+            await self.notify_channel(
+                channel,
+                f"**[{tag}] Сервер перезапустился в лобби.**",
+                is_critical=True
+            )
+            if not t.cg_lobby_purged:
+                t.cg_lobby_purged = True
+                await self.purge_round_messages(t, channel)
+
+        # 3. NEW ROUND START DETECTION
+        is_round_started = False
+        if t.cg_last_run_level in (0, 2) and run_level == 1:
+            is_round_started = True
+        elif round_id is not None and t.cg_last_round_id is not None and round_id != t.cg_last_round_id and run_level == 1:
+            is_round_started = True
+
+        if is_round_started:
+            t.cg_round_ended = False
+            t.cg_lobby_purged = False
+            await self.purge_round_messages(t, channel)
+
+            await self.notify_channel(
+                channel,
+                f"**[{tag}] Раунд #{round_id} начался. Режим: {preset} | Карта: {map_name} | Онлайн: {players}/{soft_max}**",
+                is_critical=True
+            )
+
+        t.last_round = round_id
+        t.cg_last_round_id = round_id
+        t.cg_last_run_level = run_level
+        t.cg_map = map_name
+        t.cg_preset = preset
+
+        # Live Dashboard Update
+        embed = make_dashboard_embed(
+            title=srv_title,
+            status_label=status_label,
+            color=color,
+            players=players_display,
+            round_len_str=len_str,
+            round_id_str=round_id_str,
+            map_name=map_name,
+            preset_title=preset,
+            admins_str="Метрики Prometheus закрыты хостом",
+            ghosts_str="Закрыты хостом",
+            antags_total_str="Закрыты хостом",
+            antags_roster_str="• Съем антагов недоступен (порт метрик закрыт хостом)",
+            rules_list=[preset, "BasicRoundstartVariation"],
+            footer_text=f"Онлайн: {players} игроков"
+        )
+        await self.update_dashboard(t, channel, embed)
+
     async def poll_vp_server(self, t: ServerTracker):
         channel = await self.get_tracker_channel(t)
         if not channel:
