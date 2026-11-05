@@ -54,8 +54,8 @@ PRESET_NAMES = {
     "SubvertedSilicon": "Взломанные киборги (Subverted)",
     "Wizard": "Маг (Wizard)",
     "SpaceNinja": "Космический ниндзя",
-    "Greenshift": "Зеленый щит / Мирный (Greenshift)",
-    "Extended": "Расширенный / Мирный (Extended)",
+    "Greenshift": "Навозная Яма",
+    "Extended": "Навозная Яма",
     "Survival": "Выживание (Survival)",
     "KesslerSyndrome": "Синдром Кесслера (KesslerSyndrome)",
     "AllAtOnce": "Все сразу (AllAtOnce)",
@@ -77,8 +77,9 @@ PRESET_ANTAG_NAMES = {
     "SubvertedSilicon": "Взломанные киборги",
     "Wizard": "Маги (Wizard)",
     "SpaceNinja": "Космический ниндзя",
-    "Greenshift": "Мирный раунд (без стартовых антагов)",
-    "Extended": "Расширенный (без стартовых антагов)",
+    "Greenshift": "Мидраунд антагонист",
+    "Extended": "Мидраунд антагонист",
+    "Навозная Яма": "Мидраунд антагонист",
     "Survival": "Выживание",
     "Dynamic": "Динамический режим"
 }
@@ -258,16 +259,7 @@ GHOST_ROLE_EVENTS = {
     "RevenantSpawn": "Ревенант (Revenant)",
     "Fugitive": "Беглец (Fugitive)",
     "UnknownShuttleManOWar": "Экипаж фрегата Man-O-War",
-    "ParadoxCloneSpawn": "Парадоксальный клон",
-    "DerelictEngineerCyborgSpawn": "Инженерный киборг",
-    "DerelictGenericCyborgSpawn": "Стандартный киборг",
-    "DerelictJanitorCyborgSpawn": "Уборочный киборг",
-    "DerelictMedicalCyborgSpawn": "Медицинский киборг",
-    "DerelictMiningCyborgSpawn": "Шахтерский киборг",
-    "DropPodEngineeringRepair": "Инженерный дроппод (DropPodEngineeringRepair)",
-    "ClownGoblinMigration": "Миграция клоунов-гоблинов (ClownGoblinMigration)",
-    "CockroachMigration": "Миграция тараканов (CockroachMigration)",
-    "SnailMigrationLowPop": "Миграция улиток (SnailMigrationLowPop)"
+    "ParadoxCloneSpawn": "Парадоксальный клон"
 }
 
 MIDROUND_ANTAG_EVENTS = {
@@ -330,11 +322,6 @@ ANTAG_ROLE_NAMES = {
     "Heretic": "Еретик (Heretic)",
     "Revenant": "Ревенант (Revenant)",
     "RevenantSpawn": "Ревенант (RevenantSpawn)",
-    "DerelictGenericCyborgSpawn": "Стандартный киборг (DerelictGenericCyborgSpawn)",
-    "DerelictEngineerCyborgSpawn": "Инженерный киборг (DerelictEngineerCyborgSpawn)",
-    "DerelictJanitorCyborgSpawn": "Уборочный киборг (DerelictJanitorCyborgSpawn)",
-    "DerelictMedicalCyborgSpawn": "Медицинский киборг (DerelictMedicalCyborgSpawn)",
-    "DerelictMiningCyborgSpawn": "Шахтерский киборг (DerelictMiningCyborgSpawn)",
     "DerelictSyndicateAssaultCyborgSpawn": "Штурмовой киборг Синдиката (DerelictSyndicateAssaultCyborgSpawn)",
     "AssaultOps": "Штурмовой отряд Синдиката (AssaultOps)",
     "PirateSmall": "Пиратский малый шаттл (PirateSmall)",
@@ -346,14 +333,20 @@ ANTAG_ROLE_NAMES = {
     "Blob": "Блоб (Blob)",
     "Shadowling": "Тенеморф (Shadowling)",
     "SiliconLiberation": "Восстание боргов (SiliconLiberation)",
-    "SleeperAgents": "Спящие агенты (SleeperAgents)",
-    "DropPodEngineeringRepair": "Инженерный дроппод (DropPodEngineeringRepair)",
-    "ClownGoblinMigration": "Миграция клоунов-гоблинов (ClownGoblinMigration)",
-    "CockroachMigration": "Миграция тараканов (CockroachMigration)",
-    "SnailMigrationLowPop": "Миграция улиток (SnailMigrationLowPop)"
+    "SleeperAgents": "Спящие агенты (SleeperAgents)"
 }
 
 DISASTER_EVENTS = {
+    "ClownGoblinMigration": "Миграция клоунов-гоблинов",
+    "CockroachMigration": "Миграция тараканов",
+    "SnailMigrationLowPop": "Миграция улиток",
+    "SnailMigration": "Миграция улиток",
+    "DropPodEngineeringRepair": "Инженерный дроппод ремонта",
+    "DerelictGenericCyborgSpawn": "Заброшенный стандартный киборг",
+    "DerelictEngineerCyborgSpawn": "Заброшенный инженерный киборг",
+    "DerelictJanitorCyborgSpawn": "Заброшенный уборочный киборг",
+    "DerelictMedicalCyborgSpawn": "Заброшенный медицинский киборг",
+    "DerelictMiningCyborgSpawn": "Заброшенный шахтерский киборг",
     "LustRadiationStorm": "Радиационный шторм",
     "LustRadiationOutburst": "Радиационная вспышка",
     "SolarFlare": "Вспышка на солнце (отключение связи)",
@@ -874,23 +867,23 @@ def make_dashboard_embed(
 
 ADT_PRESETS = {
     "Extended": {
-        "title": "Расширенный (Extended / Мирный)",
-        "antags": "Антагонисты отсутствуют (раунд мирный)",
+        "title": "Навозная Яма",
+        "antags": "Антагонисты отсутствуют",
         "rules": ["ExtendedStationEventScheduler", "BasicRoundstartVariation", "SubGamemodesRule", "MeteorSwarmScheduler", "CrewTransferScheduler"]
     },
     "Расширенный": {
-        "title": "Расширенный (Extended / Мирный)",
-        "antags": "Антагонисты отсутствуют (раунд мирный)",
+        "title": "Навозная Яма",
+        "antags": "Антагонисты отсутствуют",
         "rules": ["ExtendedStationEventScheduler", "BasicRoundstartVariation", "SubGamemodesRule", "MeteorSwarmScheduler", "CrewTransferScheduler"]
     },
     "Greenshift": {
-        "title": "Мирный (Greenshift)",
-        "antags": "Антагонисты отсутствуют (раунд мирный)",
+        "title": "Навозная Яма",
+        "antags": "Антагонисты отсутствуют",
         "rules": ["BasicRoundstartVariation", "SubGamemodesRule", "BasicStationEventScheduler", "MeteorSwarmScheduler", "CrewTransferScheduler"]
     },
     "Мирный": {
-        "title": "Мирный (Greenshift)",
-        "antags": "Антагонисты отсутствуют (раунд мирный)",
+        "title": "Навозная Яма",
+        "antags": "Антагонисты отсутствуют",
         "rules": ["BasicRoundstartVariation", "SubGamemodesRule", "BasicStationEventScheduler", "MeteorSwarmScheduler", "CrewTransferScheduler"]
     },
     "Secret": {
@@ -1044,7 +1037,7 @@ async def fetch_server_preset(job: str, session: aiohttp.ClientSession) -> str:
                 d = await resp.json()
                 raw_p = d.get("preset")
                 if raw_p:
-                    if raw_p == "Мирный":
+                    if raw_p in ("Мирный", "Зеленый щит", "Зеленый щит / Мирный (Greenshift)", "Навозная Яма"):
                         return "Greenshift"
                     elif raw_p == "Секрет":
                         return "Secret"
@@ -1487,7 +1480,7 @@ class TelemetryBot(commands.Bot):
             t.last_ghost_roles_count = None
 
             preset_name = status_preset or t.current_preset or await fetch_server_preset(job, self.session) or "Secret"
-            if preset_name == "Мирный":
+            if preset_name in ("Мирный", "Зеленый щит", "Зеленый щит / Мирный (Greenshift)", "Навозная Яма"):
                 preset_name = "Greenshift"
             elif preset_name == "Динамик":
                 preset_name = "Dynamic"
@@ -1648,18 +1641,26 @@ class TelemetryBot(commands.Bot):
                         is_critical=True
                     )
                 else:
-                    preset_role = PRESET_ANTAG_NAMES.get(t.current_preset, f"Антагонист ({t.current_preset or 'Режим'})")
+                    preset_role = PRESET_ANTAG_NAMES.get(t.current_preset, "")
+                    if t.current_preset in ("Greenshift", "Extended", "Мирный", "Навозная Яма") or not preset_role or "Мирный" in preset_role or "Яма" in preset_role:
+                        antag_desc = "Мидраунд антагонист"
+                    else:
+                        antag_desc = preset_role
                     await self.notify_channel(
                         channel, 
-                        f"**[{tag}] На станции активен антагонист: {preset_role} (+{diff}). Всего активных: {cur_antags}.**",
+                        f"**[{tag}] На станции активен антагонист: {antag_desc} (+{diff}). Всего активных: {cur_antags}.**",
                         is_critical=True
                     )
             elif cur_antags < t.last_antag_count and round_len > 40:
                 diff = t.last_antag_count - cur_antags
-                preset_role = PRESET_ANTAG_NAMES.get(t.current_preset, "антагонист")
+                preset_role = PRESET_ANTAG_NAMES.get(t.current_preset, "")
+                if t.current_preset in ("Greenshift", "Extended", "Мирный", "Навозная Яма") or not preset_role or "Мирный" in preset_role or "Яма" in preset_role or "Мидраунд" in preset_role:
+                    role_info = ""
+                else:
+                    role_info = f" ({preset_role})"
                 await self.notify_channel(
                     channel, 
-                    f"**[{tag}] Минус {diff} антагонист ({preset_role}: погиб или ушел в ССД). Живых на станции: {cur_antags}.**",
+                    f"**[{tag}] Минус {diff} антагонист{role_info}: погиб или ушел в ССД. Живых на станции: {cur_antags}.**",
                     is_critical=True
                 )
             elif newly_assigned_roles:
@@ -1718,7 +1719,7 @@ class TelemetryBot(commands.Bot):
 
         # Live Dashboard Update
         preset_name = t.current_preset or status_preset or "Dynamic"
-        if preset_name == "Мирный":
+        if preset_name in ("Мирный", "Зеленый щит", "Зеленый щит / Мирный (Greenshift)", "Навозная Яма"):
             preset_name = "Greenshift"
         elif preset_name == "Динамик":
             preset_name = "Dynamic"
