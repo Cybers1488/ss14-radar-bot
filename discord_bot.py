@@ -1769,7 +1769,7 @@ class TelemetryBot(commands.Bot):
         footer_text = f"Экипаж: {alive} живых / {dead} мертвых" if (str(alive).isdigit() and int(alive) > 0) else f"Онлайн: {real_players} игроков"
 
         embed = make_dashboard_embed(
-            title=("РЫБЬЯ СТАНЦИЯ: ПЕРСЕЙ" if job in ("perseus", "persey") else f"CORVAX: {job.upper()}"),
+            title=("РЫБЬЯ СТАНЦИЯ: ПЕРСЕЙ" if job in ("perseus", "persey") else f"SUNRISE: {job.upper()}"),
             status_label="В игре" if run_level != 0 else "В лобби",
             color=0x2ecc71 if run_level != 0 else 0x95a5a6,
             players=players_display,
