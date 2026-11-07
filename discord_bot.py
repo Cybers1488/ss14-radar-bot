@@ -1182,7 +1182,7 @@ class TelemetryBot(commands.Bot):
         age_days = age.days
         age_hours = age.seconds // 3600
         created_ts = int(created_at.timestamp())
-        warn_str = " ⚠️ **(Свежий аккаунт!)**" if age_days < 7 else ""
+        warn_str = " (Свежий аккаунт)" if age_days < 7 else ""
 
         avatar_url = member.display_avatar.url
 
@@ -1195,7 +1195,7 @@ class TelemetryBot(commands.Bot):
             pass
 
         embed = discord.Embed(
-            title="📥 Новый участник зашел на сервер",
+            title="Новый участник зашел на сервер",
             color=0x2ecc71,
             timestamp=now
         )
@@ -1212,9 +1212,6 @@ class TelemetryBot(commands.Bot):
             value=f"<t:{created_ts}:F>\n<t:{created_ts}:R> ({age_days} дн. {age_hours} ч. назад){warn_str}",
             inline=False
         )
-        embed.add_field(name="Тип", value="🤖 Бот" if member.bot else "👤 Игрок", inline=True)
-        embed.add_field(name="Всего на сервере", value=f"👥 **{member.guild.member_count}** участников", inline=True)
-        embed.set_footer(text=f"ID: {member.id} • NiggaLink Logger")
 
         try:
             await channel.send(embed=embed)
@@ -1238,7 +1235,7 @@ class TelemetryBot(commands.Bot):
             pass
 
         embed = discord.Embed(
-            title="📤 Участник покинул сервер",
+            title="Участник покинул сервер",
             color=0xe74c3c,
             timestamp=now
         )
@@ -1267,8 +1264,6 @@ class TelemetryBot(commands.Bot):
         if len(roles_str) > 1024:
             roles_str = roles_str[:1015] + "..."
         embed.add_field(name="Роли перед выходом", value=roles_str, inline=False)
-        embed.add_field(name="Осталось на сервере", value=f"👥 **{member.guild.member_count}** участников", inline=True)
-        embed.set_footer(text=f"ID: {member.id} • NiggaLink Logger")
 
         try:
             await channel.send(embed=embed)
