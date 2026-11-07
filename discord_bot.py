@@ -1134,8 +1134,10 @@ class ServerTracker:
 
 
 class TelemetryBot(commands.Bot):
-    def __init__(self):
-        intents = discord.Intents.default()
+    def __init__(self, intents: discord.Intents = None):
+        if intents is None:
+            intents = discord.Intents.default()
+            intents.members = True
         super().__init__(command_prefix="!", intents=intents)
         self.cfg = load_config()
         self.session: aiohttp.ClientSession = None
@@ -1151,6 +1153,128 @@ class TelemetryBot(commands.Bot):
     async def setup_hook(self):
         self.session = aiohttp.ClientSession()
         self.radar_loop.start()
+
+    async def get_member_log_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
+        ch_id = self.cfg.get("member_log_channel_id")
+        if ch_id:
+            ch = guild.get_channel(ch_id)
+            if ch:
+                return ch
+            try:
+                return await guild.fetch_channel(ch_id)
+            except Exception:
+                pass
+        for ch in guild.text_channels:
+            if ch.name.lower() in ("niggalink", "member-logs", "members-log", "логи-участников"):
+                self.cfg["member_log_channel_id"] = ch.id
+                save_config(self.cfg)
+                return ch
+        return None
+
+    async def on_member_join(self, member: discord.Member):
+        channel = await self.get_member_log_channel(member.guild)
+        if not channel:
+            return
+
+        now = datetime.now(timezone.utc)
+        created_at = member.created_at
+        age = now - created_at
+        age_days = age.days
+        age_hours = age.seconds // 3600
+        created_ts = int(created_at.timestamp())
+        warn_str = " ⚠️ **(Свежий аккаунт!)**" if age_days < 7 else ""
+
+        avatar_url = member.display_avatar.url
+
+        banner_url = None
+        try:
+            user_profile = await self.fetch_user(member.id)
+            if user_profile and user_profile.banner:
+                banner_url = user_profile.banner.url
+        except Exception:
+            pass
+
+        embed = discord.Embed(
+            title="📥 Новый участник зашел на сервер",
+            color=0x2ecc71,
+            timestamp=now
+        )
+        embed.set_author(name=f"{member.name} ({member.display_name})", icon_url=avatar_url)
+        embed.set_thumbnail(url=avatar_url)
+        if banner_url:
+            embed.set_image(url=banner_url)
+
+        embed.add_field(name="Пользователь", value=f"{member.mention} (`{member.name}`)", inline=True)
+        embed.add_field(name="Отображаемое имя", value=f"`{member.display_name}`", inline=True)
+        embed.add_field(name="ID пользователя", value=f"`{member.id}`", inline=True)
+        embed.add_field(
+            name="Регистрация в Discord",
+            value=f"<t:{created_ts}:F>\n<t:{created_ts}:R> ({age_days} дн. {age_hours} ч. назад){warn_str}",
+            inline=False
+        )
+        embed.add_field(name="Тип", value="🤖 Бот" if member.bot else "👤 Игрок", inline=True)
+        embed.add_field(name="Всего на сервере", value=f"👥 **{member.guild.member_count}** участников", inline=True)
+        embed.set_footer(text=f"ID: {member.id} • NiggaLink Logger")
+
+        try:
+            await channel.send(embed=embed)
+        except Exception as e:
+            print(f"[-] Failed to send member join log: {e}", flush=True)
+
+    async def on_member_remove(self, member: discord.Member):
+        channel = await self.get_member_log_channel(member.guild)
+        if not channel:
+            return
+
+        now = datetime.now(timezone.utc)
+        avatar_url = member.display_avatar.url
+
+        banner_url = None
+        try:
+            user_profile = await self.fetch_user(member.id)
+            if user_profile and user_profile.banner:
+                banner_url = user_profile.banner.url
+        except Exception:
+            pass
+
+        embed = discord.Embed(
+            title="📤 Участник покинул сервер",
+            color=0xe74c3c,
+            timestamp=now
+        )
+        embed.set_author(name=f"{member.name} ({member.display_name})", icon_url=avatar_url)
+        embed.set_thumbnail(url=avatar_url)
+        if banner_url:
+            embed.set_image(url=banner_url)
+
+        embed.add_field(name="Пользователь", value=f"{member.mention} (`{member.name}`)", inline=True)
+        embed.add_field(name="Отображаемое имя", value=f"`{member.display_name}`", inline=True)
+        embed.add_field(name="ID пользователя", value=f"`{member.id}`", inline=True)
+
+        if member.joined_at:
+            joined_ts = int(member.joined_at.timestamp())
+            stay_duration = now - member.joined_at
+            s_days = stay_duration.days
+            s_hours = stay_duration.seconds // 3600
+            embed.add_field(
+                name="Был на сервере с",
+                value=f"<t:{joined_ts}:F>\n<t:{joined_ts}:R> (провел {s_days} дн. {s_hours} ч.)",
+                inline=False
+            )
+
+        roles = [r.mention for r in member.roles if r.name != "@everyone"]
+        roles_str = ", ".join(roles) if roles else "Отсутствовали"
+        if len(roles_str) > 1024:
+            roles_str = roles_str[:1015] + "..."
+        embed.add_field(name="Роли перед выходом", value=roles_str, inline=False)
+        embed.add_field(name="Осталось на сервере", value=f"👥 **{member.guild.member_count}** участников", inline=True)
+        embed.set_footer(text=f"ID: {member.id} • NiggaLink Logger")
+
+        try:
+            await channel.send(embed=embed)
+        except Exception as e:
+            print(f"[-] Failed to send member leave log: {e}", flush=True)
+
 
     async def on_ready(self):
         print(f"[+] Bot logged in as {self.user} (ID: {self.user.id})", flush=True)
@@ -2627,811 +2751,840 @@ class TelemetryBot(commands.Bot):
         await self.wait_until_ready()
 
 
-bot = TelemetryBot()
+def setup_commands(bot: TelemetryBot):
+
+    def resolve_server(interaction: discord.Interaction, passed_server: str = None) -> str:
+        if passed_server:
+            s = passed_server.lower()
+            if s in ("sigma", "goob-sigma"):
+                return "goob-sigma"
+            if s in ("basileus", "baselius", "omega", "goob-basileus", "goob-baselius"):
+                return "goob-basileus"
+            if s in ("adventure", "adventure_time"):
+                return "vp"
+            if s in ("persey", "perseus", "fish", "fish-station", "fish_station"):
+                return "perseus"
+            if s in ("void", "corvaxgoob", "corvaxgoob-void", "corvaxgoob_void"):
+                return "corvaxgoob-void"
+            if s in ("lumen", "corvaxgoob-lumen", "corvaxgoob_lumen"):
+                return "corvaxgoob-lumen"
+            if s in ("spectral", "venus", "perseus", "invicta", "astra", "fenix", "fire", "vp", "corvaxgoob-void"):
+                return s
+        for s_name, ch_id in bot.cfg.get("server_channels", {}).items():
+            if interaction.channel_id == ch_id:
+                return s_name
+        return bot.cfg.get("default_server", "spectral")
 
 
-def resolve_server(interaction: discord.Interaction, passed_server: str = None) -> str:
-    if passed_server:
-        s = passed_server.lower()
-        if s in ("sigma", "goob-sigma"):
-            return "goob-sigma"
-        if s in ("basileus", "baselius", "omega", "goob-basileus", "goob-baselius"):
-            return "goob-basileus"
-        if s in ("adventure", "adventure_time"):
-            return "vp"
-        if s in ("persey", "perseus", "fish", "fish-station", "fish_station"):
-            return "perseus"
-        if s in ("void", "corvaxgoob", "corvaxgoob-void", "corvaxgoob_void"):
-            return "corvaxgoob-void"
-        if s in ("lumen", "corvaxgoob-lumen", "corvaxgoob_lumen"):
-            return "corvaxgoob-lumen"
-        if s in ("spectral", "venus", "perseus", "invicta", "astra", "fenix", "fire", "vp", "corvaxgoob-void"):
-            return s
-    for s_name, ch_id in bot.cfg.get("server_channels", {}).items():
-        if interaction.channel_id == ch_id:
-            return s_name
-    return bot.cfg.get("default_server", "spectral")
+    @bot.tree.command(name="setchannel", description="Привязать текущий канал к серверу для оповещений")
+    @app_commands.describe(server="Сервер для привязки (spectral, venus, goob-sigma, goob-basileus, vp)")
+    async def cmd_setchannel(interaction: discord.Interaction, server: str = "spectral"):
+        server = server.lower()
+        if server in ("void", "corvaxgoob", "corvaxgoob-void", "corvaxgoob_void"):
+            server = "corvaxgoob-void"
+        elif server in ("lumen", "corvaxgoob-lumen", "corvaxgoob_lumen"):
+            server = "corvaxgoob-lumen" 
+        if "server_channels" not in bot.cfg:
+            bot.cfg["server_channels"] = {}
+        bot.cfg["server_channels"][server] = interaction.channel_id
 
-
-@bot.tree.command(name="setchannel", description="Привязать текущий канал к серверу для оповещений")
-@app_commands.describe(server="Сервер для привязки (spectral, venus, goob-sigma, goob-basileus, vp)")
-async def cmd_setchannel(interaction: discord.Interaction, server: str = "spectral"):
-    server = server.lower()
-    if server in ("void", "corvaxgoob", "corvaxgoob-void", "corvaxgoob_void"):
-        server = "corvaxgoob-void"
-    elif server in ("lumen", "corvaxgoob-lumen", "corvaxgoob_lumen"):
-        server = "corvaxgoob-lumen" 
-    if "server_channels" not in bot.cfg:
-        bot.cfg["server_channels"] = {}
-    bot.cfg["server_channels"][server] = interaction.channel_id
-
-    if server in bot.trackers:
-        bot.trackers[server].channel_id = interaction.channel_id
-        bot.trackers[server].cached_channel = interaction.channel
-    else:
-        bot.trackers[server] = ServerTracker(server, interaction.channel_id)
-        bot.trackers[server].cached_channel = interaction.channel
-
-    save_config(bot.cfg)
-    await interaction.response.send_message(
-        f"Канал <#{interaction.channel_id}> привязан к серверу **{server.upper()}**.",
-        ephemeral=True
-    )
-
-
-@bot.tree.command(name="clearchat", description="Очистить старые сообщения бота в канале и пересоздать живую табличку")
-async def cmd_clearchat(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    deleted = 0
-    try:
-        async for m in interaction.channel.history(limit=50):
-            if m.author.id == bot.user.id:
-                try:
-                    await m.delete()
-                    deleted += 1
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    server = resolve_server(interaction)
-    if server in bot.trackers:
-        bot.trackers[server].dashboard_msg = None
-        bot.trackers[server].last_dashboard_fingerprint = ""
-    if "dashboard_messages" in bot.cfg and server in bot.cfg["dashboard_messages"]:
-        del bot.cfg["dashboard_messages"][server]
-        save_config(bot.cfg)
-
-    await interaction.followup.send(
-        f"Очищено {deleted} сообщений бота. Живая табличка обновится в канале.",
-        ephemeral=True
-    )
-
-
-@bot.tree.command(name="admins", description="Количество активных и скрытых (деадмин) администраторов")
-@app_commands.describe(server="Сервер (spectral, venus, goob-sigma, goob-basileus, vp, perseus, invicta)")
-async def cmd_admins(interaction: discord.Interaction, server: str = None):
-    await interaction.response.defer()
-    server = resolve_server(interaction, server)
-
-    if server in ("vp", "adventure", "adventure_time"):
-        prom_url = "http://193.164.18.155:9090"
-        admin_data = await prom_query(prom_url, bot.session, "ss14_adminmanager_admins_online_count")
-        active = 0
-        deadminned = 0
-        for a in admin_data:
-            st = a.get("metric", {}).get("state")
-            v = int(float(a["value"][1]))
-            if st == "active":
-                active += v
-            elif st == "deadminned":
-                deadminned += v
-        status_note = "Надзор активен." if active > 0 else "Активный надзор отсутствует (все деадмин/оффлайн)."
-        msg = (
-            f"Обстановка по администрации на **ВРЕМЯ ПРИКЛЮЧЕНИЙ**:\n"
-            f"- Активных админов (с панелью): **{active}**\n"
-            f"- Скрытых админов (деадмин / играют): **{deadminned}**\n"
-            f"- Всего на сервере: **{active + deadminned}**\n\n"
-            f"Статус: {status_note}"
-        )
-        await interaction.followup.send(msg)
-        return
-
-    if server.startswith("goob"):
-        status_url, metrics_url, tag = get_goob_target(server)
-        raw_metrics = ""
-        try:
-            async with bot.session.get(metrics_url, timeout=6, ssl=False) as resp:
-                if resp.status == 200:
-                    raw_metrics = await resp.text()
-        except Exception:
-            pass
-        active = 0
-        deadminned = 0
-        for line in raw_metrics.splitlines():
-            if line.startswith("ss14_adminmanager_admins_online_count{"):
-                m = re.match(r'ss14_adminmanager_admins_online_count\{rank="[^"]*",state="([^"]+)"\}\s+([0-9.]+)', line)
-                if m:
-                    st = m.group(1)
-                    v = int(float(m.group(2)))
-                    if st == "active":
-                        active += v
-                    elif st == "deadminned":
-                        deadminned += v
-        status_note = "Надзор активен." if active > 0 else "Активный надзор отсутствует (все деадмин/оффлайн)."
-        msg = (
-            f"Обстановка по администрации на **{tag}**:\n"
-            f"- Активных админов (с панелью): **{active}**\n"
-            f"- Скрытых админов (деадмин / играют): **{deadminned}**\n"
-            f"- Всего на сервере: **{active + deadminned}**\n\n"
-            f"Статус: {status_note}"
-        )
-        await interaction.followup.send(msg)
-        return
-
-    prom_url = bot.cfg.get("prometheus_url", "http://185.97.255.6:9090")
-    admin_data = await prom_query(prom_url, bot.session, f"ss14_adminmanager_admins_online_count{{job='{server}'}}")
-    active = 0
-    deadminned = 0
-    afk = 0
-    for a in admin_data:
-        st = a.get("metric", {}).get("state")
-        v = int(a["value"][1])
-        if st == "active":
-            active = v
-        elif st == "deadminned":
-            deadminned = v
-        elif st == "afk":
-            afk = v
-
-    total = active + deadminned + afk
-    status_note = "Надзор активен." if active > 0 else "Активный надзор отсутствует (все деадмин/оффлайн)."
-
-    msg = (
-        f"Обстановка по администрации на **{server.upper()}**:\n"
-        f"- Активных админов (с панелью): **{active}**\n"
-        f"- Скрытых админов (деадмин / играют): **{deadminned}**\n"
-        f"- В АФК: **{afk}**\n"
-        f"- Всего на сервере: **{total}**\n\n"
-        f"Статус: {status_note}"
-    )
-    await interaction.followup.send(msg)
-
-
-@bot.tree.command(name="antags", description="Количество и точный состав живых антагонистов, гост-ролей и геймрулы")
-@app_commands.describe(server="Сервер (spectral, venus, goob-sigma, goob-basileus, vp, perseus, invicta)")
-async def cmd_antags(interaction: discord.Interaction, server: str = None):
-    await interaction.response.defer()
-    server = resolve_server(interaction, server)
-
-    if server in ("vp", "adventure", "adventure_time"):
-        status_data = {}
-        try:
-            async with bot.session.get("http://193.164.18.155:1212/status", timeout=4) as resp:
-                if resp.status == 200:
-                    status_data = await resp.json()
-        except Exception:
-            pass
-
-        prom_url = "http://193.164.18.155:9090"
-        cur_round = "?"
-        m_len = 0
-        players = status_data.get("players", "?")
-
-        try:
-            r_round = await prom_query(prom_url, bot.session, "ss14_round_number")
-            if r_round:
-                cur_round = r_round[0]["value"][1]
-        except Exception:
-            pass
-
-        try:
-            r_len = await prom_query(prom_url, bot.session, "ss14_round_length")
-            if r_len and r_len[0]["value"][1]:
-                m_len = int(float(r_len[0]["value"][1]))
-        except Exception:
-            pass
-
-        m, s = divmod(m_len, 60)
-        len_str = f" ({m:02d}:{s:02d})" if m_len > 0 else ""
-
-        map_name = status_data.get("map", "Cyberiada")
-        round_id = status_data.get("round_id", cur_round)
-        preset = status_data.get("preset", "Extended")
-
-        preset_info = ADT_PRESETS.get(preset, {})
-        preset_title = preset_info.get("title", preset)
-        antags_desc = preset_info.get("antags", "По активному режиму")
-        rules_text = format_adt_rules_stack(preset)
-
-        msg = (
-            f"Обстановка по антагонистам на **ВРЕМЯ ПРИКЛЮЧЕНИЙ**:\n"
-            f"- Карта: **{map_name}** | Раунд: **#{round_id or cur_round}**{len_str}\n"
-            f"- Онлайн: **{players}** игроков\n"
-            f"- Режим: **{preset_title}**\n"
-            f"- Состав антагонистов: **{antags_desc}**\n\n"
-            f"Активные геймрулы:\n{rules_text}"
-        )
-        await interaction.followup.send(msg)
-        return
-
-    if server.startswith("goob"):
-        status_url, metrics_url, tag = get_goob_target(server)
-        status_data = {}
-        try:
-            async with bot.session.get(status_url, timeout=5, ssl=False) as resp:
-                if resp.status == 200:
-                    status_data = await resp.json()
-        except Exception:
-            pass
-
-        raw_metrics = ""
-        try:
-            async with bot.session.get(metrics_url, timeout=6, ssl=False) as resp:
-                if resp.status == 200:
-                    raw_metrics = await resp.text()
-        except Exception:
-            pass
-
-        cur_round = "?"
-        m_rnd = re.search(r"ss14_round_number\s+([0-9]+)", raw_metrics)
-        if m_rnd:
-            cur_round = m_rnd.group(1)
-
-        m_len = re.search(r"ss14_round_length\s+([0-9.]+)", raw_metrics)
-        length_sec = int(float(m_len.group(1))) if m_len else 0
-        m, s = divmod(length_sec, 60)
-        len_str = f" ({m:02d}:{s:02d})" if length_sec > 0 else ""
-
-        antags = {}
-        for line in raw_metrics.splitlines():
-            if line.startswith("game_director_antags{"):
-                m = re.match(r'game_director_antags\{rule="([^"]+)"\}\s+([0-9.]+)', line)
-                if m:
-                    antags[m.group(1)] = int(float(m.group(2)))
-
-        ghosts = 0
-        m_g = re.search(r"game_director_active_ghosts\s+([0-9.]+)", raw_metrics)
-        if m_g:
-            ghosts = int(float(m_g.group(1)))
-
-        story = "?"
-        beat = "?"
-        m_b = re.search(r'game_director_beat_info\{story_name="([^"]+)",beat_name="([^"]+)"\}\s+1', raw_metrics)
-        if m_b:
-            story = m_b.group(1)
-            beat = m_b.group(2)
-
-        events = []
-        for line in raw_metrics.splitlines():
-            if line.startswith("game_director_events_run_total{"):
-                m = re.match(r'game_director_events_run_total\{event_name="([^"]+)",beat_name="([^"]+)"\}\s+([0-9.]+)', line)
-                if m:
-                    events.append(f"{m.group(1)} ({m.group(2)})")
-
-        roundstart_antags = []
-        for line in raw_metrics.splitlines():
-            if line.startswith("game_director_roundstart_antags_selected_total{"):
-                m = re.match(r'game_director_roundstart_antags_selected_total\{antag_name="([^"]+)"\}\s+([0-9.]+)', line)
-                if m and float(m.group(2)) > 0:
-                    roundstart_antags.append(m.group(1))
-
-        map_name = status_data.get("map", "Unknown")
-        round_id = status_data.get("round_id", cur_round)
-        players = status_data.get("players", "?")
-        preset = status_data.get("preset", "The Guide")
-
-        preset_info = GOOB_PRESETS.get(preset, {})
-        preset_title = preset_info.get("title", preset)
-        story_title = GOOB_STORIES.get(story, story)
-        beat_title = GOOB_BEATS.get(beat, beat)
-        rules_text = format_goob_rules_stack(preset, roundstart_antags, story, beat)
-
-        total_antags = sum(antags.values())
-        t_tracker = bot.trackers.get(server)
-        lost_map = t_tracker.goob_antags_lost if t_tracker else {}
-        spawn_times = t_tracker.rule_spawn_times if t_tracker else {}
-        mid_rules = t_tracker.goob_midround_rules if t_tracker else []
-        has_lost = any(v > 0 for v in lost_map.values())
-        antags_list_str = format_goob_roster(antags, lost_map) if (total_antags > 0 or has_lost) else "• Все антагонисты нейтрализованы (0)."
-        rules_text = format_goob_rules_stack(preset, roundstart_antags, story, beat, spawn_times, mid_rules)
-
-        ev_str = "\n".join([f"  • `{ev}`" for ev in events]) if events else "  • `(нет)`"
-
-        msg = (
-            f"Обстановка по антагонистам на **{tag}**:\n"
-            f"- Карта: **{map_name}** | Раунд: **#{round_id or cur_round}**{len_str}\n"
-            f"- Онлайн: **{players}** игроков\n"
-            f"- Живых антагонистов: **{total_antags}**\n"
-            f"{antags_list_str}\n"
-            f"- В лобби / призраков (ожидают спавна / роли): **{ghosts}**\n"
-            f"- Сценарий Game Director: **{story_title}** (фаза: **{beat_title}**)\n"
-            f"- Режим: **{preset_title}**\n\n"
-            f"Геймрулы:\n{rules_text}\n\n"
-            f"События Game Director в раунде:\n{ev_str}"
-        )
-        await interaction.followup.send(msg)
-        return
-
-    prom_url = bot.cfg.get("prometheus_url", "http://185.97.255.6:9090")
-
-    r_cnt = await prom_query(prom_url, bot.session, f"antags_player_count{{job='{server}'}}")
-    count = r_cnt[0]["value"][1] if r_cnt else "0"
-    antags_num = int(count)
-
-    r_ghost = await prom_query(prom_url, bot.session, f"ss14_storyteller_available_ghost_roles{{job='{server}'}}")
-    ghost_count = r_ghost[0]["value"][1] if r_ghost else "0"
-
-    t = bot.trackers.get(server)
-    preset_name = t.current_preset if t else None
-    if not preset_name:
-        preset_name = await fetch_server_preset(server, bot.session)
-    if not preset_name:
-        sp_data = await prom_query(prom_url, bot.session, f"secret_preset_selected{{job='{server}'}}")
-        if sp_data:
-            preset_name = sp_data[-1].get("metric", {}).get("preset", "Traitor")
+        if server in bot.trackers:
+            bot.trackers[server].channel_id = interaction.channel_id
+            bot.trackers[server].cached_channel = interaction.channel
         else:
-            preset_name = "Greenshift"
+            bot.trackers[server] = ServerTracker(server, interaction.channel_id)
+            bot.trackers[server].cached_channel = interaction.channel
 
-    preset_title = PRESET_NAMES.get(preset_name, preset_name)
-    rules_text = format_rules_stack(preset_name)
-
-    role_desc = PRESET_ANTAG_NAMES.get(preset_name, f"Антагонисты ({preset_name})")
-    if antags_num == 0:
-        composition_text = "Все антагонисты нейтрализованы или раунд мирный (0 живых)."
-    else:
-        composition_text = f"**{antags_num}x {role_desc}**"
-
-    active_threats = []
-    r_len = await prom_query(prom_url, bot.session, f"ss14_round_length{{job='{server}'}}")
-    round_len_s = max(60, int(float(r_len[0]["value"][1]))) if r_len and r_len[0]["value"][1] else 3600
-
-    currencies = await prom_query(
-        prom_url,
-        bot.session,
-        f"increase(ss14_store_currency_spent_total{{job='{server}'}}[{round_len_s}s])"
-    )
-    for c in currencies:
-        curr = c.get("metric", {}).get("currency")
-        val = int(round(float(c["value"][1])))
-        if curr == "Telecrystal" and val > 0:
-            active_threats.append(f"Синдикат (потрачено {val} ТК в аплинке)")
-        elif curr == "ChangelingDNA" and val > 0:
-            active_threats.append(f"Генокрады ({val} очков ДНК)")
-        elif curr == "WizCoin" and val > 0:
-            active_threats.append(f"Маги ({val} монет в спеллбуке)")
-        elif curr == "StolenEssence" and val > 0:
-            active_threats.append(f"Вампиры ({val} украденной крови)")
-        elif curr == "SiliconMemory" and val > 0:
-            active_threats.append(f"Взломанные киборги ({val} памяти)")
-
-    threats_line = ""
-    if active_threats:
-        threats_line = "\n- Траты валют за текущий раунд: " + "; ".join(active_threats)
-
-    msg = (
-        f"Обстановка по антагонистам на **{server.upper()}**:\n"
-        f"- Живых антагонистов: **{antags_num}**\n"
-        f"- Текущий состав: {composition_text}{threats_line}\n"
-        f"- Доступно в F7 (гост-роли): **{ghost_count}** свободных мест\n"
-        f"- Режим раунда: **{preset_title}**\n\n"
-        f"Геймрулы:\n{rules_text}"
-    )
-    await interaction.followup.send(msg)
+        save_config(bot.cfg)
+        await interaction.response.send_message(
+            f"Канал <#{interaction.channel_id}> привязан к серверу **{server.upper()}**.",
+            ephemeral=True
+        )
 
 
-@bot.tree.command(name="status", description="Краткая сводка по станции: антаги, админы, раунд, геймрулы")
-@app_commands.describe(server="Сервер (spectral, venus, goob-sigma, goob-basileus, vp, perseus, invicta)")
-async def cmd_status(interaction: discord.Interaction, server: str = None):
-    await interaction.response.defer()
-    server = resolve_server(interaction, server)
-
-    if server in ("vp", "adventure", "adventure_time"):
-        status_data = {}
+    @bot.tree.command(name="clearchat", description="Очистить старые сообщения бота в канале и пересоздать живую табличку")
+    async def cmd_clearchat(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        deleted = 0
         try:
-            async with bot.session.get("http://193.164.18.155:1212/status", timeout=4) as resp:
-                if resp.status == 200:
-                    status_data = await resp.json()
+            async for m in interaction.channel.history(limit=50):
+                if m.author.id == bot.user.id:
+                    try:
+                        await m.delete()
+                        deleted += 1
+                    except Exception:
+                        pass
         except Exception:
             pass
 
-        prom_url = "http://193.164.18.155:9090"
-        cur_round = "?"
-        m_len = 0
-        players = status_data.get("players", "?")
+        server = resolve_server(interaction)
+        if server in bot.trackers:
+            bot.trackers[server].dashboard_msg = None
+            bot.trackers[server].last_dashboard_fingerprint = ""
+        if "dashboard_messages" in bot.cfg and server in bot.cfg["dashboard_messages"]:
+            del bot.cfg["dashboard_messages"][server]
+            save_config(bot.cfg)
 
-        try:
-            r_round = await prom_query(prom_url, bot.session, "ss14_round_number")
-            if r_round:
-                cur_round = r_round[0]["value"][1]
-        except Exception:
-            pass
+        await interaction.followup.send(
+            f"Очищено {deleted} сообщений бота. Живая табличка обновится в канале.",
+            ephemeral=True
+        )
 
-        try:
-            r_len = await prom_query(prom_url, bot.session, "ss14_round_length")
-            if r_len and r_len[0]["value"][1]:
-                m_len = int(float(r_len[0]["value"][1]))
-        except Exception:
-            pass
 
-        m, s = divmod(m_len, 60)
-        len_str = f" ({m:02d}:{s:02d})" if m_len > 0 else ""
+    @bot.tree.command(name="admins", description="Количество активных и скрытых (деадмин) администраторов")
+    @app_commands.describe(server="Сервер (spectral, venus, goob-sigma, goob-basileus, vp, perseus, invicta)")
+    async def cmd_admins(interaction: discord.Interaction, server: str = None):
+        await interaction.response.defer()
+        server = resolve_server(interaction, server)
 
-        active_adm = 0
-        deadmin_adm = 0
-        try:
+        if server in ("vp", "adventure", "adventure_time"):
+            prom_url = "http://193.164.18.155:9090"
             admin_data = await prom_query(prom_url, bot.session, "ss14_adminmanager_admins_online_count")
+            active = 0
+            deadminned = 0
             for a in admin_data:
                 st = a.get("metric", {}).get("state")
                 v = int(float(a["value"][1]))
                 if st == "active":
-                    active_adm += v
+                    active += v
                 elif st == "deadminned":
-                    deadmin_adm += v
-        except Exception:
-            pass
+                    deadminned += v
+            status_note = "Надзор активен." if active > 0 else "Активный надзор отсутствует (все деадмин/оффлайн)."
+            msg = (
+                f"Обстановка по администрации на **ВРЕМЯ ПРИКЛЮЧЕНИЙ**:\n"
+                f"- Активных админов (с панелью): **{active}**\n"
+                f"- Скрытых админов (деадмин / играют): **{deadminned}**\n"
+                f"- Всего на сервере: **{active + deadminned}**\n\n"
+                f"Статус: {status_note}"
+            )
+            await interaction.followup.send(msg)
+            return
 
-        entities_cnt = "?"
-        try:
-            r_ent = await prom_query(prom_url, bot.session, "robust_entities_count")
-            if r_ent:
-                entities_cnt = r_ent[0]["value"][1]
-        except Exception:
-            pass
+        if server.startswith("goob"):
+            status_url, metrics_url, tag = get_goob_target(server)
+            raw_metrics = ""
+            try:
+                async with bot.session.get(metrics_url, timeout=6, ssl=False) as resp:
+                    if resp.status == 200:
+                        raw_metrics = await resp.text()
+            except Exception:
+                pass
+            active = 0
+            deadminned = 0
+            for line in raw_metrics.splitlines():
+                if line.startswith("ss14_adminmanager_admins_online_count{"):
+                    m = re.match(r'ss14_adminmanager_admins_online_count\{rank="[^"]*",state="([^"]+)"\}\s+([0-9.]+)', line)
+                    if m:
+                        st = m.group(1)
+                        v = int(float(m.group(2)))
+                        if st == "active":
+                            active += v
+                        elif st == "deadminned":
+                            deadminned += v
+            status_note = "Надзор активен." if active > 0 else "Активный надзор отсутствует (все деадмин/оффлайн)."
+            msg = (
+                f"Обстановка по администрации на **{tag}**:\n"
+                f"- Активных админов (с панелью): **{active}**\n"
+                f"- Скрытых админов (деадмин / играют): **{deadminned}**\n"
+                f"- Всего на сервере: **{active + deadminned}**\n\n"
+                f"Статус: {status_note}"
+            )
+            await interaction.followup.send(msg)
+            return
 
-        map_name = status_data.get("map", "Cyberiada")
-        round_id = status_data.get("round_id", cur_round)
-        preset = status_data.get("preset", "Extended")
-        panic_bunker = "Активен (вход ограничен)" if status_data.get("panic_bunker") else "Отключен"
+        prom_url = bot.cfg.get("prometheus_url", "http://185.97.255.6:9090")
+        admin_data = await prom_query(prom_url, bot.session, f"ss14_adminmanager_admins_online_count{{job='{server}'}}")
+        active = 0
+        deadminned = 0
+        afk = 0
+        for a in admin_data:
+            st = a.get("metric", {}).get("state")
+            v = int(a["value"][1])
+            if st == "active":
+                active = v
+            elif st == "deadminned":
+                deadminned = v
+            elif st == "afk":
+                afk = v
 
-        preset_info = ADT_PRESETS.get(preset, {})
-        preset_title = preset_info.get("title", preset)
-        antags_desc = preset_info.get("antags", "По активному режиму")
-        rules_text = format_adt_rules_stack(preset)
+        total = active + deadminned + afk
+        status_note = "Надзор активен." if active > 0 else "Активный надзор отсутствует (все деадмин/оффлайн)."
 
         msg = (
-            f"Сводка по станции **ВРЕМЯ ПРИКЛЮЧЕНИЙ**:\n"
-            f"- Карта: **{map_name}** | Раунд: **#{round_id or cur_round}**{len_str}\n"
-            f"- Режим: **{preset_title}**\n"
-            f"- Антагонисты: {antags_desc}\n"
-            f"- Онлайн: **{players}** игроков\n"
-            f"- Администрация: **{active_adm}** активных, **{deadmin_adm}** скрытых\n"
-            f"- Активных сущностей (Entities): **{entities_cnt}**\n"
-            f"- Паник-бункер: {panic_bunker}\n\n"
-            f"Активные геймрулы:\n{rules_text}"
+            f"Обстановка по администрации на **{server.upper()}**:\n"
+            f"- Активных админов (с панелью): **{active}**\n"
+            f"- Скрытых админов (деадмин / играют): **{deadminned}**\n"
+            f"- В АФК: **{afk}**\n"
+            f"- Всего на сервере: **{total}**\n\n"
+            f"Статус: {status_note}"
         )
         await interaction.followup.send(msg)
-        return
 
-    if server.startswith("goob"):
-        status_url, metrics_url, tag = get_goob_target(server)
-        status_data = {}
-        try:
-            async with bot.session.get(status_url, timeout=5, ssl=False) as resp:
-                if resp.status == 200:
-                    status_data = await resp.json()
-        except Exception:
-            pass
 
-        raw_metrics = ""
-        try:
-            async with bot.session.get(metrics_url, timeout=6, ssl=False) as resp:
-                if resp.status == 200:
-                    raw_metrics = await resp.text()
-        except Exception:
-            pass
+    @bot.tree.command(name="antags", description="Количество и точный состав живых антагонистов, гост-ролей и геймрулы")
+    @app_commands.describe(server="Сервер (spectral, venus, goob-sigma, goob-basileus, vp, perseus, invicta)")
+    async def cmd_antags(interaction: discord.Interaction, server: str = None):
+        await interaction.response.defer()
+        server = resolve_server(interaction, server)
 
-        cur_round = "?"
-        m_rnd = re.search(r"ss14_round_number\s+([0-9]+)", raw_metrics)
-        if m_rnd:
-            cur_round = m_rnd.group(1)
+        if server in ("vp", "adventure", "adventure_time"):
+            status_data = {}
+            try:
+                async with bot.session.get("http://193.164.18.155:1212/status", timeout=4) as resp:
+                    if resp.status == 200:
+                        status_data = await resp.json()
+            except Exception:
+                pass
 
-        m_len = re.search(r"ss14_round_length\s+([0-9.]+)", raw_metrics)
-        length_sec = int(float(m_len.group(1))) if m_len else 0
-        m, s = divmod(length_sec, 60)
-        len_str = f" ({m:02d}:{s:02d})" if length_sec > 0 else ""
+            prom_url = "http://193.164.18.155:9090"
+            cur_round = "?"
+            m_len = 0
+            players = status_data.get("players", "?")
 
-        antags = {}
-        for line in raw_metrics.splitlines():
-            if line.startswith("game_director_antags{"):
-                m = re.match(r'game_director_antags\{rule="([^"]+)"\}\s+([0-9.]+)', line)
-                if m:
-                    antags[m.group(1)] = int(float(m.group(2)))
+            try:
+                r_round = await prom_query(prom_url, bot.session, "ss14_round_number")
+                if r_round:
+                    cur_round = r_round[0]["value"][1]
+            except Exception:
+                pass
 
-        ghosts = 0
-        m_g = re.search(r"game_director_active_ghosts\s+([0-9.]+)", raw_metrics)
-        if m_g:
-            ghosts = int(float(m_g.group(1)))
+            try:
+                r_len = await prom_query(prom_url, bot.session, "ss14_round_length")
+                if r_len and r_len[0]["value"][1]:
+                    m_len = int(float(r_len[0]["value"][1]))
+            except Exception:
+                pass
 
-        story = "?"
-        beat = "?"
-        m_b = re.search(r'game_director_beat_info\{story_name="([^"]+)",beat_name="([^"]+)"\}\s+1', raw_metrics)
-        if m_b:
-            story = m_b.group(1)
-            beat = m_b.group(2)
+            m, s = divmod(m_len, 60)
+            len_str = f" ({m:02d}:{s:02d})" if m_len > 0 else ""
 
-        active_adm = 0
-        deadmin_adm = 0
-        for line in raw_metrics.splitlines():
-            if line.startswith("ss14_adminmanager_admins_online_count{"):
-                m = re.match(r'ss14_adminmanager_admins_online_count\{rank="[^"]*",state="([^"]+)"\}\s+([0-9.]+)', line)
-                if m:
-                    st = m.group(1)
-                    v = int(float(m.group(2)))
+            map_name = status_data.get("map", "Cyberiada")
+            round_id = status_data.get("round_id", cur_round)
+            preset = status_data.get("preset", "Extended")
+
+            preset_info = ADT_PRESETS.get(preset, {})
+            preset_title = preset_info.get("title", preset)
+            antags_desc = preset_info.get("antags", "По активному режиму")
+            rules_text = format_adt_rules_stack(preset)
+
+            msg = (
+                f"Обстановка по антагонистам на **ВРЕМЯ ПРИКЛЮЧЕНИЙ**:\n"
+                f"- Карта: **{map_name}** | Раунд: **#{round_id or cur_round}**{len_str}\n"
+                f"- Онлайн: **{players}** игроков\n"
+                f"- Режим: **{preset_title}**\n"
+                f"- Состав антагонистов: **{antags_desc}**\n\n"
+                f"Активные геймрулы:\n{rules_text}"
+            )
+            await interaction.followup.send(msg)
+            return
+
+        if server.startswith("goob"):
+            status_url, metrics_url, tag = get_goob_target(server)
+            status_data = {}
+            try:
+                async with bot.session.get(status_url, timeout=5, ssl=False) as resp:
+                    if resp.status == 200:
+                        status_data = await resp.json()
+            except Exception:
+                pass
+
+            raw_metrics = ""
+            try:
+                async with bot.session.get(metrics_url, timeout=6, ssl=False) as resp:
+                    if resp.status == 200:
+                        raw_metrics = await resp.text()
+            except Exception:
+                pass
+
+            cur_round = "?"
+            m_rnd = re.search(r"ss14_round_number\s+([0-9]+)", raw_metrics)
+            if m_rnd:
+                cur_round = m_rnd.group(1)
+
+            m_len = re.search(r"ss14_round_length\s+([0-9.]+)", raw_metrics)
+            length_sec = int(float(m_len.group(1))) if m_len else 0
+            m, s = divmod(length_sec, 60)
+            len_str = f" ({m:02d}:{s:02d})" if length_sec > 0 else ""
+
+            antags = {}
+            for line in raw_metrics.splitlines():
+                if line.startswith("game_director_antags{"):
+                    m = re.match(r'game_director_antags\{rule="([^"]+)"\}\s+([0-9.]+)', line)
+                    if m:
+                        antags[m.group(1)] = int(float(m.group(2)))
+
+            ghosts = 0
+            m_g = re.search(r"game_director_active_ghosts\s+([0-9.]+)", raw_metrics)
+            if m_g:
+                ghosts = int(float(m_g.group(1)))
+
+            story = "?"
+            beat = "?"
+            m_b = re.search(r'game_director_beat_info\{story_name="([^"]+)",beat_name="([^"]+)"\}\s+1', raw_metrics)
+            if m_b:
+                story = m_b.group(1)
+                beat = m_b.group(2)
+
+            events = []
+            for line in raw_metrics.splitlines():
+                if line.startswith("game_director_events_run_total{"):
+                    m = re.match(r'game_director_events_run_total\{event_name="([^"]+)",beat_name="([^"]+)"\}\s+([0-9.]+)', line)
+                    if m:
+                        events.append(f"{m.group(1)} ({m.group(2)})")
+
+            roundstart_antags = []
+            for line in raw_metrics.splitlines():
+                if line.startswith("game_director_roundstart_antags_selected_total{"):
+                    m = re.match(r'game_director_roundstart_antags_selected_total\{antag_name="([^"]+)"\}\s+([0-9.]+)', line)
+                    if m and float(m.group(2)) > 0:
+                        roundstart_antags.append(m.group(1))
+
+            map_name = status_data.get("map", "Unknown")
+            round_id = status_data.get("round_id", cur_round)
+            players = status_data.get("players", "?")
+            preset = status_data.get("preset", "The Guide")
+
+            preset_info = GOOB_PRESETS.get(preset, {})
+            preset_title = preset_info.get("title", preset)
+            story_title = GOOB_STORIES.get(story, story)
+            beat_title = GOOB_BEATS.get(beat, beat)
+            rules_text = format_goob_rules_stack(preset, roundstart_antags, story, beat)
+
+            total_antags = sum(antags.values())
+            t_tracker = bot.trackers.get(server)
+            lost_map = t_tracker.goob_antags_lost if t_tracker else {}
+            spawn_times = t_tracker.rule_spawn_times if t_tracker else {}
+            mid_rules = t_tracker.goob_midround_rules if t_tracker else []
+            has_lost = any(v > 0 for v in lost_map.values())
+            antags_list_str = format_goob_roster(antags, lost_map) if (total_antags > 0 or has_lost) else "• Все антагонисты нейтрализованы (0)."
+            rules_text = format_goob_rules_stack(preset, roundstart_antags, story, beat, spawn_times, mid_rules)
+
+            ev_str = "\n".join([f"  • `{ev}`" for ev in events]) if events else "  • `(нет)`"
+
+            msg = (
+                f"Обстановка по антагонистам на **{tag}**:\n"
+                f"- Карта: **{map_name}** | Раунд: **#{round_id or cur_round}**{len_str}\n"
+                f"- Онлайн: **{players}** игроков\n"
+                f"- Живых антагонистов: **{total_antags}**\n"
+                f"{antags_list_str}\n"
+                f"- В лобби / призраков (ожидают спавна / роли): **{ghosts}**\n"
+                f"- Сценарий Game Director: **{story_title}** (фаза: **{beat_title}**)\n"
+                f"- Режим: **{preset_title}**\n\n"
+                f"Геймрулы:\n{rules_text}\n\n"
+                f"События Game Director в раунде:\n{ev_str}"
+            )
+            await interaction.followup.send(msg)
+            return
+
+        prom_url = bot.cfg.get("prometheus_url", "http://185.97.255.6:9090")
+
+        r_cnt = await prom_query(prom_url, bot.session, f"antags_player_count{{job='{server}'}}")
+        count = r_cnt[0]["value"][1] if r_cnt else "0"
+        antags_num = int(count)
+
+        r_ghost = await prom_query(prom_url, bot.session, f"ss14_storyteller_available_ghost_roles{{job='{server}'}}")
+        ghost_count = r_ghost[0]["value"][1] if r_ghost else "0"
+
+        t = bot.trackers.get(server)
+        preset_name = t.current_preset if t else None
+        if not preset_name:
+            preset_name = await fetch_server_preset(server, bot.session)
+        if not preset_name:
+            sp_data = await prom_query(prom_url, bot.session, f"secret_preset_selected{{job='{server}'}}")
+            if sp_data:
+                preset_name = sp_data[-1].get("metric", {}).get("preset", "Traitor")
+            else:
+                preset_name = "Greenshift"
+
+        preset_title = PRESET_NAMES.get(preset_name, preset_name)
+        rules_text = format_rules_stack(preset_name)
+
+        role_desc = PRESET_ANTAG_NAMES.get(preset_name, f"Антагонисты ({preset_name})")
+        if antags_num == 0:
+            composition_text = "Все антагонисты нейтрализованы или раунд мирный (0 живых)."
+        else:
+            composition_text = f"**{antags_num}x {role_desc}**"
+
+        active_threats = []
+        r_len = await prom_query(prom_url, bot.session, f"ss14_round_length{{job='{server}'}}")
+        round_len_s = max(60, int(float(r_len[0]["value"][1]))) if r_len and r_len[0]["value"][1] else 3600
+
+        currencies = await prom_query(
+            prom_url,
+            bot.session,
+            f"increase(ss14_store_currency_spent_total{{job='{server}'}}[{round_len_s}s])"
+        )
+        for c in currencies:
+            curr = c.get("metric", {}).get("currency")
+            val = int(round(float(c["value"][1])))
+            if curr == "Telecrystal" and val > 0:
+                active_threats.append(f"Синдикат (потрачено {val} ТК в аплинке)")
+            elif curr == "ChangelingDNA" and val > 0:
+                active_threats.append(f"Генокрады ({val} очков ДНК)")
+            elif curr == "WizCoin" and val > 0:
+                active_threats.append(f"Маги ({val} монет в спеллбуке)")
+            elif curr == "StolenEssence" and val > 0:
+                active_threats.append(f"Вампиры ({val} украденной крови)")
+            elif curr == "SiliconMemory" and val > 0:
+                active_threats.append(f"Взломанные киборги ({val} памяти)")
+
+        threats_line = ""
+        if active_threats:
+            threats_line = "\n- Траты валют за текущий раунд: " + "; ".join(active_threats)
+
+        msg = (
+            f"Обстановка по антагонистам на **{server.upper()}**:\n"
+            f"- Живых антагонистов: **{antags_num}**\n"
+            f"- Текущий состав: {composition_text}{threats_line}\n"
+            f"- Доступно в F7 (гост-роли): **{ghost_count}** свободных мест\n"
+            f"- Режим раунда: **{preset_title}**\n\n"
+            f"Геймрулы:\n{rules_text}"
+        )
+        await interaction.followup.send(msg)
+
+
+    @bot.tree.command(name="status", description="Краткая сводка по станции: антаги, админы, раунд, геймрулы")
+    @app_commands.describe(server="Сервер (spectral, venus, goob-sigma, goob-basileus, vp, perseus, invicta)")
+    async def cmd_status(interaction: discord.Interaction, server: str = None):
+        await interaction.response.defer()
+        server = resolve_server(interaction, server)
+
+        if server in ("vp", "adventure", "adventure_time"):
+            status_data = {}
+            try:
+                async with bot.session.get("http://193.164.18.155:1212/status", timeout=4) as resp:
+                    if resp.status == 200:
+                        status_data = await resp.json()
+            except Exception:
+                pass
+
+            prom_url = "http://193.164.18.155:9090"
+            cur_round = "?"
+            m_len = 0
+            players = status_data.get("players", "?")
+
+            try:
+                r_round = await prom_query(prom_url, bot.session, "ss14_round_number")
+                if r_round:
+                    cur_round = r_round[0]["value"][1]
+            except Exception:
+                pass
+
+            try:
+                r_len = await prom_query(prom_url, bot.session, "ss14_round_length")
+                if r_len and r_len[0]["value"][1]:
+                    m_len = int(float(r_len[0]["value"][1]))
+            except Exception:
+                pass
+
+            m, s = divmod(m_len, 60)
+            len_str = f" ({m:02d}:{s:02d})" if m_len > 0 else ""
+
+            active_adm = 0
+            deadmin_adm = 0
+            try:
+                admin_data = await prom_query(prom_url, bot.session, "ss14_adminmanager_admins_online_count")
+                for a in admin_data:
+                    st = a.get("metric", {}).get("state")
+                    v = int(float(a["value"][1]))
                     if st == "active":
                         active_adm += v
                     elif st == "deadminned":
                         deadmin_adm += v
+            except Exception:
+                pass
 
-        dept_staff = {}
-        for line in raw_metrics.splitlines():
-            if line.startswith("game_director_department_staff{"):
-                m = re.match(r'game_director_department_staff\{department="([^"]+)"\}\s+([0-9.]+)', line)
-                if m:
-                    dept_staff[m.group(1)] = int(float(m.group(2)))
+            entities_cnt = "?"
+            try:
+                r_ent = await prom_query(prom_url, bot.session, "robust_entities_count")
+                if r_ent:
+                    entities_cnt = r_ent[0]["value"][1]
+            except Exception:
+                pass
 
-        roundstart_antags = []
-        for line in raw_metrics.splitlines():
-            if line.startswith("game_director_roundstart_antags_selected_total{"):
-                m = re.match(r'game_director_roundstart_antags_selected_total\{antag_name="([^"]+)"\}\s+([0-9.]+)', line)
-                if m and float(m.group(2)) > 0:
-                    roundstart_antags.append(m.group(1))
+            map_name = status_data.get("map", "Cyberiada")
+            round_id = status_data.get("round_id", cur_round)
+            preset = status_data.get("preset", "Extended")
+            panic_bunker = "Активен (вход ограничен)" if status_data.get("panic_bunker") else "Отключен"
 
-        map_name = status_data.get("map", "Unknown")
-        round_id = status_data.get("round_id", cur_round)
-        players = status_data.get("players", "?")
-        preset = status_data.get("preset", "The Guide")
+            preset_info = ADT_PRESETS.get(preset, {})
+            preset_title = preset_info.get("title", preset)
+            antags_desc = preset_info.get("antags", "По активному режиму")
+            rules_text = format_adt_rules_stack(preset)
 
-        preset_info = GOOB_PRESETS.get(preset, {})
-        preset_title = preset_info.get("title", preset)
-        story_title = GOOB_STORIES.get(story, story)
-        beat_title = GOOB_BEATS.get(beat, beat)
-        rules_text = format_goob_rules_stack(preset, roundstart_antags, story, beat)
+            msg = (
+                f"Сводка по станции **ВРЕМЯ ПРИКЛЮЧЕНИЙ**:\n"
+                f"- Карта: **{map_name}** | Раунд: **#{round_id or cur_round}**{len_str}\n"
+                f"- Режим: **{preset_title}**\n"
+                f"- Антагонисты: {antags_desc}\n"
+                f"- Онлайн: **{players}** игроков\n"
+                f"- Администрация: **{active_adm}** активных, **{deadmin_adm}** скрытых\n"
+                f"- Активных сущностей (Entities): **{entities_cnt}**\n"
+                f"- Паник-бункер: {panic_bunker}\n\n"
+                f"Активные геймрулы:\n{rules_text}"
+            )
+            await interaction.followup.send(msg)
+            return
 
-        total_antags = sum(antags.values())
-        antag_breakdown = ", ".join([f"{get_antag_display(k)}: {v}" for k, v in antags.items()]) if antags else "0"
-        staff_str = ", ".join([f"{k}: {v}" for k, v in sorted(dept_staff.items(), key=lambda x: x[1], reverse=True)]) if dept_staff else "нет данных"
+        if server.startswith("goob"):
+            status_url, metrics_url, tag = get_goob_target(server)
+            status_data = {}
+            try:
+                async with bot.session.get(status_url, timeout=5, ssl=False) as resp:
+                    if resp.status == 200:
+                        status_data = await resp.json()
+            except Exception:
+                pass
 
+            raw_metrics = ""
+            try:
+                async with bot.session.get(metrics_url, timeout=6, ssl=False) as resp:
+                    if resp.status == 200:
+                        raw_metrics = await resp.text()
+            except Exception:
+                pass
+
+            cur_round = "?"
+            m_rnd = re.search(r"ss14_round_number\s+([0-9]+)", raw_metrics)
+            if m_rnd:
+                cur_round = m_rnd.group(1)
+
+            m_len = re.search(r"ss14_round_length\s+([0-9.]+)", raw_metrics)
+            length_sec = int(float(m_len.group(1))) if m_len else 0
+            m, s = divmod(length_sec, 60)
+            len_str = f" ({m:02d}:{s:02d})" if length_sec > 0 else ""
+
+            antags = {}
+            for line in raw_metrics.splitlines():
+                if line.startswith("game_director_antags{"):
+                    m = re.match(r'game_director_antags\{rule="([^"]+)"\}\s+([0-9.]+)', line)
+                    if m:
+                        antags[m.group(1)] = int(float(m.group(2)))
+
+            ghosts = 0
+            m_g = re.search(r"game_director_active_ghosts\s+([0-9.]+)", raw_metrics)
+            if m_g:
+                ghosts = int(float(m_g.group(1)))
+
+            story = "?"
+            beat = "?"
+            m_b = re.search(r'game_director_beat_info\{story_name="([^"]+)",beat_name="([^"]+)"\}\s+1', raw_metrics)
+            if m_b:
+                story = m_b.group(1)
+                beat = m_b.group(2)
+
+            active_adm = 0
+            deadmin_adm = 0
+            for line in raw_metrics.splitlines():
+                if line.startswith("ss14_adminmanager_admins_online_count{"):
+                    m = re.match(r'ss14_adminmanager_admins_online_count\{rank="[^"]*",state="([^"]+)"\}\s+([0-9.]+)', line)
+                    if m:
+                        st = m.group(1)
+                        v = int(float(m.group(2)))
+                        if st == "active":
+                            active_adm += v
+                        elif st == "deadminned":
+                            deadmin_adm += v
+
+            dept_staff = {}
+            for line in raw_metrics.splitlines():
+                if line.startswith("game_director_department_staff{"):
+                    m = re.match(r'game_director_department_staff\{department="([^"]+)"\}\s+([0-9.]+)', line)
+                    if m:
+                        dept_staff[m.group(1)] = int(float(m.group(2)))
+
+            roundstart_antags = []
+            for line in raw_metrics.splitlines():
+                if line.startswith("game_director_roundstart_antags_selected_total{"):
+                    m = re.match(r'game_director_roundstart_antags_selected_total\{antag_name="([^"]+)"\}\s+([0-9.]+)', line)
+                    if m and float(m.group(2)) > 0:
+                        roundstart_antags.append(m.group(1))
+
+            map_name = status_data.get("map", "Unknown")
+            round_id = status_data.get("round_id", cur_round)
+            players = status_data.get("players", "?")
+            preset = status_data.get("preset", "The Guide")
+
+            preset_info = GOOB_PRESETS.get(preset, {})
+            preset_title = preset_info.get("title", preset)
+            story_title = GOOB_STORIES.get(story, story)
+            beat_title = GOOB_BEATS.get(beat, beat)
+            rules_text = format_goob_rules_stack(preset, roundstart_antags, story, beat)
+
+            total_antags = sum(antags.values())
+            antag_breakdown = ", ".join([f"{get_antag_display(k)}: {v}" for k, v in antags.items()]) if antags else "0"
+            staff_str = ", ".join([f"{k}: {v}" for k, v in sorted(dept_staff.items(), key=lambda x: x[1], reverse=True)]) if dept_staff else "нет данных"
+
+            msg = (
+                f"Сводка по станции **{tag}**:\n"
+                f"- Карта: **{map_name}** | Раунд: **#{round_id or cur_round}**{len_str}\n"
+                f"- Режим: **{preset_title}**\n"
+                f"- Сюжет Game Director: **{story_title}** ({beat_title})\n"
+                f"- Онлайн: **{players}** игроков | Призраков в лобби: **{ghosts}**\n"
+                f"- Живых антагонистов: **{total_antags}** ({antag_breakdown})\n"
+                f"- Администрация: **{active_adm}** активных, **{deadmin_adm}** скрытых\n"
+                f"- Персонал по отделам: {staff_str}\n\n"
+                f"Активные геймрулы:\n{rules_text}"
+            )
+            await interaction.followup.send(msg)
+            return
+
+        prom_url = bot.cfg.get("prometheus_url", "http://185.97.255.6:9090")
+
+        r_round = await prom_query(prom_url, bot.session, f"ss14_round_number{{job='{server}'}}")
+        cur_round = r_round[0]["value"][1] if r_round else "?"
+
+        r_len = await prom_query(prom_url, bot.session, f"ss14_round_length{{job='{server}'}}")
+        length_sec = int(float(r_len[0]["value"][1])) if r_len and r_len[0]["value"][1] else 0
+        m, s = divmod(length_sec, 60)
+
+        r_players = await prom_query(prom_url, bot.session, f"robust_player_count{{job='{server}'}}")
+        players = r_players[0]["value"][1] if r_players else "?"
+
+        r_alive = await prom_query(prom_url, bot.session, f"ss14_storyteller_alive_players{{job='{server}'}}")
+        alive = r_alive[0]["value"][1] if r_alive else "?"
+
+        r_dead = await prom_query(prom_url, bot.session, f"ss14_storyteller_dead_players{{job='{server}'}}")
+        dead = r_dead[0]["value"][1] if r_dead else "?"
+
+        r_antags = await prom_query(prom_url, bot.session, f"antags_player_count{{job='{server}'}}")
+        antags_cnt = r_antags[0]["value"][1] if r_antags else "0"
+
+        admin_data = await prom_query(prom_url, bot.session, f"ss14_adminmanager_admins_online_count{{job='{server}'}}")
+        active_adm = 0
+        deadmin_adm = 0
+        for a in admin_data:
+            st = a.get("metric", {}).get("state")
+            v = int(a["value"][1])
+            if st == "active":
+                active_adm = v
+            elif st == "deadminned":
+                deadmin_adm = v
+
+        t = bot.trackers.get(server)
+        preset_name = t.current_preset if t else None
+        if not preset_name:
+            preset_name = await fetch_server_preset(server, bot.session) or "Greenshift"
+
+        preset_title = PRESET_NAMES.get(preset_name, preset_name)
+        rules_text = format_rules_stack(preset_name)
+        role_desc = PRESET_ANTAG_NAMES.get(preset_name, preset_name)
+        antag_status_str = f"**{antags_cnt}** ({role_desc})" if int(antags_cnt) > 0 else "**0**"
+
+        r_roles = await prom_query(prom_url, bot.session, f"ss14_storyteller_available_ghost_roles{{job='{server}'}}")
+        ghost_roles = r_roles[0]["value"][1] if r_roles else "0"
+
+        r_alert = await prom_query(prom_url, bot.session, f"ss14_storyteller_alert_level{{job='{server}'}}")
+        alert_lvl = int(r_alert[0]["value"][1]) if r_alert else 0
+        alert_name = ALERT_MAP.get(alert_lvl, f"Уровень {alert_lvl}")
+
+        r_atmos = await prom_query(prom_url, bot.session, f"ss14_storyteller_atmos_unsafe_ratio{{job='{server}'}}")
+        atmos_pct = f"{float(r_atmos[0]['value'][1]) * 100:.1f}%" if r_atmos else "0%"
+
+        r_tesla = await prom_query(prom_url, bot.session, f"ss14_storyteller_tesla_active{{job='{server}'}}")
+        tesla = "врублена" if r_tesla and r_tesla[0]["value"][1] == "1" else "выключена"
+
+        len_str = f" ({m:02d}:{s:02d})" if length_sec > 0 else ""
         msg = (
-            f"Сводка по станции **{tag}**:\n"
-            f"- Карта: **{map_name}** | Раунд: **#{round_id or cur_round}**{len_str}\n"
+            f"Сводка по станции **{server.upper()}**:\n"
+            f"- Раунд: #{cur_round}{len_str}\n"
             f"- Режим: **{preset_title}**\n"
-            f"- Сюжет Game Director: **{story_title}** ({beat_title})\n"
-            f"- Онлайн: **{players}** игроков | Призраков в лобби: **{ghosts}**\n"
-            f"- Живых антагонистов: **{total_antags}** ({antag_breakdown})\n"
+            f"- Живых антагонистов: {antag_status_str}\n"
             f"- Администрация: **{active_adm}** активных, **{deadmin_adm}** скрытых\n"
-            f"- Персонал по отделам: {staff_str}\n\n"
+            f"- Свободных гост-ролей (F7): **{ghost_roles}**\n"
+            f"- Онлайн: {players} (живых: {alive}, погибших: {dead})\n"
+            f"- Код тревоги: {alert_name}\n"
+            f"- Опасная атмосфера: {atmos_pct}\n"
+            f"- Тесла: {tesla}\n\n"
             f"Активные геймрулы:\n{rules_text}"
         )
         await interaction.followup.send(msg)
-        return
-
-    prom_url = bot.cfg.get("prometheus_url", "http://185.97.255.6:9090")
-
-    r_round = await prom_query(prom_url, bot.session, f"ss14_round_number{{job='{server}'}}")
-    cur_round = r_round[0]["value"][1] if r_round else "?"
-
-    r_len = await prom_query(prom_url, bot.session, f"ss14_round_length{{job='{server}'}}")
-    length_sec = int(float(r_len[0]["value"][1])) if r_len and r_len[0]["value"][1] else 0
-    m, s = divmod(length_sec, 60)
-
-    r_players = await prom_query(prom_url, bot.session, f"robust_player_count{{job='{server}'}}")
-    players = r_players[0]["value"][1] if r_players else "?"
-
-    r_alive = await prom_query(prom_url, bot.session, f"ss14_storyteller_alive_players{{job='{server}'}}")
-    alive = r_alive[0]["value"][1] if r_alive else "?"
-
-    r_dead = await prom_query(prom_url, bot.session, f"ss14_storyteller_dead_players{{job='{server}'}}")
-    dead = r_dead[0]["value"][1] if r_dead else "?"
-
-    r_antags = await prom_query(prom_url, bot.session, f"antags_player_count{{job='{server}'}}")
-    antags_cnt = r_antags[0]["value"][1] if r_antags else "0"
-
-    admin_data = await prom_query(prom_url, bot.session, f"ss14_adminmanager_admins_online_count{{job='{server}'}}")
-    active_adm = 0
-    deadmin_adm = 0
-    for a in admin_data:
-        st = a.get("metric", {}).get("state")
-        v = int(a["value"][1])
-        if st == "active":
-            active_adm = v
-        elif st == "deadminned":
-            deadmin_adm = v
-
-    t = bot.trackers.get(server)
-    preset_name = t.current_preset if t else None
-    if not preset_name:
-        preset_name = await fetch_server_preset(server, bot.session) or "Greenshift"
-
-    preset_title = PRESET_NAMES.get(preset_name, preset_name)
-    rules_text = format_rules_stack(preset_name)
-    role_desc = PRESET_ANTAG_NAMES.get(preset_name, preset_name)
-    antag_status_str = f"**{antags_cnt}** ({role_desc})" if int(antags_cnt) > 0 else "**0**"
-
-    r_roles = await prom_query(prom_url, bot.session, f"ss14_storyteller_available_ghost_roles{{job='{server}'}}")
-    ghost_roles = r_roles[0]["value"][1] if r_roles else "0"
-
-    r_alert = await prom_query(prom_url, bot.session, f"ss14_storyteller_alert_level{{job='{server}'}}")
-    alert_lvl = int(r_alert[0]["value"][1]) if r_alert else 0
-    alert_name = ALERT_MAP.get(alert_lvl, f"Уровень {alert_lvl}")
-
-    r_atmos = await prom_query(prom_url, bot.session, f"ss14_storyteller_atmos_unsafe_ratio{{job='{server}'}}")
-    atmos_pct = f"{float(r_atmos[0]['value'][1]) * 100:.1f}%" if r_atmos else "0%"
-
-    r_tesla = await prom_query(prom_url, bot.session, f"ss14_storyteller_tesla_active{{job='{server}'}}")
-    tesla = "врублена" if r_tesla and r_tesla[0]["value"][1] == "1" else "выключена"
-
-    len_str = f" ({m:02d}:{s:02d})" if length_sec > 0 else ""
-    msg = (
-        f"Сводка по станции **{server.upper()}**:\n"
-        f"- Раунд: #{cur_round}{len_str}\n"
-        f"- Режим: **{preset_title}**\n"
-        f"- Живых антагонистов: {antag_status_str}\n"
-        f"- Администрация: **{active_adm}** активных, **{deadmin_adm}** скрытых\n"
-        f"- Свободных гост-ролей (F7): **{ghost_roles}**\n"
-        f"- Онлайн: {players} (живых: {alive}, погибших: {dead})\n"
-        f"- Код тревоги: {alert_name}\n"
-        f"- Опасная атмосфера: {atmos_pct}\n"
-        f"- Тесла: {tesla}\n\n"
-        f"Активные геймрулы:\n{rules_text}"
-    )
-    await interaction.followup.send(msg)
 
 
-@bot.tree.command(name="director", description="Состояние сторителлера и баланс угроз")
-@app_commands.describe(server="Сервер (spectral, venus, perseus, invicta)")
-async def cmd_director(interaction: discord.Interaction, server: str = None):
-    await interaction.response.defer()
-    server = resolve_server(interaction, server)
-    prom_url = bot.cfg.get("prometheus_url", "http://185.97.255.6:9090")
+    @bot.tree.command(name="director", description="Состояние сторителлера и баланс угроз")
+    @app_commands.describe(server="Сервер (spectral, venus, perseus, invicta)")
+    async def cmd_director(interaction: discord.Interaction, server: str = None):
+        await interaction.response.defer()
+        server = resolve_server(interaction, server)
+        prom_url = bot.cfg.get("prometheus_url", "http://185.97.255.6:9090")
 
-    r_pacing = await prom_query(prom_url, bot.session, f"ss14_storyteller_pacing_state{{job='{server}'}}")
-    pacing_code = int(r_pacing[0]["value"][1]) if r_pacing else 0
-    p_title = PACING_MAP.get(pacing_code, f"Неизвестно ({pacing_code})")
+        r_pacing = await prom_query(prom_url, bot.session, f"ss14_storyteller_pacing_state{{job='{server}'}}")
+        pacing_code = int(r_pacing[0]["value"][1]) if r_pacing else 0
+        p_title = PACING_MAP.get(pacing_code, f"Неизвестно ({pacing_code})")
 
-    r_threat = await prom_query(prom_url, bot.session, f"ss14_storyteller_threat_budget{{job='{server}'}}")
-    threat = f"{float(r_threat[0]['value'][1]):.1f}" if r_threat else "0"
+        r_threat = await prom_query(prom_url, bot.session, f"ss14_storyteller_threat_budget{{job='{server}'}}")
+        threat = f"{float(r_threat[0]['value'][1]):.1f}" if r_threat else "0"
 
-    r_major = await prom_query(prom_url, bot.session, f"ss14_storyteller_major_threat_budget{{job='{server}'}}")
-    major = f"{float(r_major[0]['value'][1]):.1f}" if r_major else "0"
+        r_major = await prom_query(prom_url, bot.session, f"ss14_storyteller_major_threat_budget{{job='{server}'}}")
+        major = f"{float(r_major[0]['value'][1]):.1f}" if r_major else "0"
 
-    r_stress = await prom_query(prom_url, bot.session, f"ss14_storyteller_crew_stress{{job='{server}'}}")
-    stress = f"{float(r_stress[0]['value'][1]):.1f}" if r_stress else "0"
+        r_stress = await prom_query(prom_url, bot.session, f"ss14_storyteller_crew_stress{{job='{server}'}}")
+        stress = f"{float(r_stress[0]['value'][1]):.1f}" if r_stress else "0"
 
-    msg = (
-        f"Сторителлер на **{server.upper()}**:\n"
-        f"- Фаза: **{p_title}**\n"
-        f"- Бюджет малых угроз: {threat} / 250\n"
-        f"- Бюджет мажорных антагов: {major}\n"
-        f"- Стресс экипажа: {stress}%"
-    )
-    await interaction.followup.send(msg)
-
-
-@bot.tree.command(name="armory", description="Заказы вооружения через Карго")
-@app_commands.describe(server="Сервер (spectral, venus, perseus, invicta)")
-async def cmd_armory(interaction: discord.Interaction, server: str = None):
-    await interaction.response.defer()
-    server = resolve_server(interaction, server)
-    prom_url = bot.cfg.get("prometheus_url", "http://185.97.255.6:9090")
-
-    r_cargo = await prom_query(prom_url, bot.session, f"ss14_cargo_order_fulfilled_total{{job='{server}', product_id=~'Armory.*|.*Weapon.*|.*Bullet.*|.*Grenade.*'}}")
-
-    if not r_cargo:
-        await interaction.followup.send(f"На сервере **{server.upper()}** поставок оружия в карго не зафиксировано.")
-        return
-
-    lines = [f"Поставки оружия в Карго на **{server.upper()}**:"]
-    for c in r_cargo:
-        pid = c.get("metric", {}).get("product_id")
-        cnt = c["value"][1]
-        lines.append(f"- {pid}: {cnt} шт.")
-
-    await interaction.followup.send("\n".join(lines))
-
-
-@bot.tree.command(name="ghosts", description="Информация о свободных гост-ролях и активных призраках")
-@app_commands.describe(server="Сервер (spectral, venus, goob-sigma, goob-basileus, vp, perseus, invicta)")
-async def cmd_ghosts(interaction: discord.Interaction, server: str = None):
-    await interaction.response.defer()
-    server = resolve_server(interaction, server)
-
-    if server in ("vp", "adventure", "adventure_time"):
-        await interaction.followup.send(
-            "На сервере **ВРЕМЯ ПРИКЛЮЧЕНИЙ** количество свободных мест в F7 не экспортируется в публичные метрики. Проверяйте меню F7 в игре."
+        msg = (
+            f"Сторителлер на **{server.upper()}**:\n"
+            f"- Фаза: **{p_title}**\n"
+            f"- Бюджет малых угроз: {threat} / 250\n"
+            f"- Бюджет мажорных антагов: {major}\n"
+            f"- Стресс экипажа: {stress}%"
         )
-        return
+        await interaction.followup.send(msg)
 
-    if server.startswith("goob"):
-        status_url, metrics_url, tag = get_goob_target(server)
-        raw_metrics = ""
-        try:
-            async with bot.session.get(metrics_url, timeout=6, ssl=False) as resp:
-                if resp.status == 200:
-                    raw_metrics = await resp.text()
-        except Exception:
-            pass
 
-        ghosts = 0
-        m_g = re.search(r"game_director_active_ghosts\s+([0-9.]+)", raw_metrics)
-        if m_g:
-            ghosts = int(float(m_g.group(1)))
+    @bot.tree.command(name="armory", description="Заказы вооружения через Карго")
+    @app_commands.describe(server="Сервер (spectral, venus, perseus, invicta)")
+    async def cmd_armory(interaction: discord.Interaction, server: str = None):
+        await interaction.response.defer()
+        server = resolve_server(interaction, server)
+        prom_url = bot.cfg.get("prometheus_url", "http://185.97.255.6:9090")
 
-        antags = {}
-        for line in raw_metrics.splitlines():
-            if line.startswith("game_director_antags{"):
-                m = re.match(r'game_director_antags\{rule="([^"]+)"\}\s+([0-9.]+)', line)
-                if m:
-                    antags[m.group(1)] = int(float(m.group(2)))
+        r_cargo = await prom_query(prom_url, bot.session, f"ss14_cargo_order_fulfilled_total{{job='{server}', product_id=~'Armory.*|.*Weapon.*|.*Bullet.*|.*Grenade.*'}}")
 
-        events = {}
-        for line in raw_metrics.splitlines():
-            if line.startswith("game_director_events_run_total{"):
-                m = re.match(r'game_director_events_run_total\{event_name="([^"]+)",beat_name="[^"]*"\}\s+([0-9.]+)', line)
-                if m:
-                    ev = m.group(1)
-                    cnt = int(float(m.group(2)))
-                    events[ev] = events.get(ev, 0) + cnt
+        if not r_cargo:
+            await interaction.followup.send(f"На сервере **{server.upper()}** поставок оружия в карго не зафиксировано.")
+            return
 
-        ghost_roles_keys = ("spawn", "cyborg", "droppod", "migration", "fugitive", "clone", "ninja", "dragon", "abductor", "revenant", "rat", "pirate", "horde", "critter")
-        def is_ghost_role(r: str) -> bool:
-            low = r.lower()
-            return any(k in low for k in ghost_roles_keys)
+        lines = [f"Поставки оружия в Карго на **{server.upper()}**:"]
+        for c in r_cargo:
+            pid = c.get("metric", {}).get("product_id")
+            cnt = c["value"][1]
+            lines.append(f"- {pid}: {cnt} шт.")
 
-        g_roles = {k: v for k, v in antags.items() if is_ghost_role(k) and v > 0}
-        main_antags = {k: v for k, v in antags.items() if not is_ghost_role(k) and v > 0}
+        await interaction.followup.send("\n".join(lines))
 
-        msg_lines = [
-            f"Обстановка по гост-ролям и призракам на **{tag}**:\n",
-            f"- Призраков в лобби (ожидают спавна / роли): **{ghosts}**\n",
-            "**Активные заспавненные гост-роли на станции:**"
-        ]
 
-        if g_roles:
-            for k, v in sorted(g_roles.items(), key=lambda x: x[1], reverse=True):
-                msg_lines.append(f"  • **{get_antag_display(k)}**: **{v}**")
-        else:
-            msg_lines.append("  • `(нет активных гост-ролей на станции)`")
+    @bot.tree.command(name="ghosts", description="Информация о свободных гост-ролях и активных призраках")
+    @app_commands.describe(server="Сервер (spectral, venus, goob-sigma, goob-basileus, vp, perseus, invicta)")
+    async def cmd_ghosts(interaction: discord.Interaction, server: str = None):
+        await interaction.response.defer()
+        server = resolve_server(interaction, server)
 
-        msg_lines.append("\n**Ивенты спавна ролей / существ (Game Director):**")
-        spawn_events = {k: v for k, v in events.items() if is_ghost_role(k)}
-        if spawn_events:
-            for k, v in sorted(spawn_events.items(), key=lambda x: x[1], reverse=True):
-                msg_lines.append(f"  • **{get_antag_display(k)}**: **{v}** раз(а)")
-        else:
-            msg_lines.append("  • `(ивентов спавна пока не запускалось)`")
+        if server in ("vp", "adventure", "adventure_time"):
+            await interaction.followup.send(
+                "На сервере **ВРЕМЯ ПРИКЛЮЧЕНИЙ** количество свободных мест в F7 не экспортируется в публичные метрики. Проверяйте меню F7 в игре."
+            )
+            return
 
-        if main_antags:
-            msg_lines.append("\n**Другие активные антагонисты:**")
-            for k, v in sorted(main_antags.items(), key=lambda x: x[1], reverse=True):
-                msg_lines.append(f"  • **{get_antag_display(k)}**: **{v}**")
+        if server.startswith("goob"):
+            status_url, metrics_url, tag = get_goob_target(server)
+            raw_metrics = ""
+            try:
+                async with bot.session.get(metrics_url, timeout=6, ssl=False) as resp:
+                    if resp.status == 200:
+                        raw_metrics = await resp.text()
+            except Exception:
+                pass
 
-        await interaction.followup.send("\n".join(msg_lines))
-        return
+            ghosts = 0
+            m_g = re.search(r"game_director_active_ghosts\s+([0-9.]+)", raw_metrics)
+            if m_g:
+                ghosts = int(float(m_g.group(1)))
 
-    prom_url = bot.cfg.get("prometheus_url", "http://185.97.255.6:9090")
-    r_ghost = await prom_query(prom_url, bot.session, f"ss14_storyteller_available_ghost_roles{{job='{server}'}}")
-    ghost_count = r_ghost[0]["value"][1] if r_ghost else "0"
+            antags = {}
+            for line in raw_metrics.splitlines():
+                if line.startswith("game_director_antags{"):
+                    m = re.match(r'game_director_antags\{rule="([^"]+)"\}\s+([0-9.]+)', line)
+                    if m:
+                        antags[m.group(1)] = int(float(m.group(2)))
 
-    t = bot.trackers.get(server)
-    recent = ""
-    if t and t.recent_ghost_antags:
-        recent = "\n- Последние взятые боевые роли: " + ", ".join(t.recent_ghost_antags)
+            events = {}
+            for line in raw_metrics.splitlines():
+                if line.startswith("game_director_events_run_total{"):
+                    m = re.match(r'game_director_events_run_total\{event_name="([^"]+)",beat_name="[^"]*"\}\s+([0-9.]+)', line)
+                    if m:
+                        ev = m.group(1)
+                        cnt = int(float(m.group(2)))
+                        events[ev] = events.get(ev, 0) + cnt
 
-    msg = (
-        f"Обстановка по гост-ролям на **{server.upper()}**:\n"
-        f"- Доступно в меню F7 (свободных мест): **{ghost_count}**{recent}"
-    )
-    await interaction.followup.send(msg)
+            ghost_roles_keys = ("spawn", "cyborg", "droppod", "migration", "fugitive", "clone", "ninja", "dragon", "abductor", "revenant", "rat", "pirate", "horde", "critter")
+            def is_ghost_role(r: str) -> bool:
+                low = r.lower()
+                return any(k in low for k in ghost_roles_keys)
 
+            g_roles = {k: v for k, v in antags.items() if is_ghost_role(k) and v > 0}
+            main_antags = {k: v for k, v in antags.items() if not is_ghost_role(k) and v > 0}
+
+            msg_lines = [
+                f"Обстановка по гост-ролям и призракам на **{tag}**:\n",
+                f"- Призраков в лобби (ожидают спавна / роли): **{ghosts}**\n",
+                "**Активные заспавненные гост-роли на станции:**"
+            ]
+
+            if g_roles:
+                for k, v in sorted(g_roles.items(), key=lambda x: x[1], reverse=True):
+                    msg_lines.append(f"  • **{get_antag_display(k)}**: **{v}**")
+            else:
+                msg_lines.append("  • `(нет активных гост-ролей на станции)`")
+
+            msg_lines.append("\n**Ивенты спавна ролей / существ (Game Director):**")
+            spawn_events = {k: v for k, v in events.items() if is_ghost_role(k)}
+            if spawn_events:
+                for k, v in sorted(spawn_events.items(), key=lambda x: x[1], reverse=True):
+                    msg_lines.append(f"  • **{get_antag_display(k)}**: **{v}** раз(а)")
+            else:
+                msg_lines.append("  • `(ивентов спавна пока не запускалось)`")
+
+            if main_antags:
+                msg_lines.append("\n**Другие активные антагонисты:**")
+                for k, v in sorted(main_antags.items(), key=lambda x: x[1], reverse=True):
+                    msg_lines.append(f"  • **{get_antag_display(k)}**: **{v}**")
+
+            await interaction.followup.send("\n".join(msg_lines))
+            return
+
+        prom_url = bot.cfg.get("prometheus_url", "http://185.97.255.6:9090")
+        r_ghost = await prom_query(prom_url, bot.session, f"ss14_storyteller_available_ghost_roles{{job='{server}'}}")
+        ghost_count = r_ghost[0]["value"][1] if r_ghost else "0"
+
+        t = bot.trackers.get(server)
+        recent = ""
+        if t and t.recent_ghost_antags:
+            recent = "\n- Последние взятые боевые роли: " + ", ".join(t.recent_ghost_antags)
+
+        msg = (
+            f"Обстановка по гост-ролям на **{server.upper()}**:\n"
+            f"- Доступно в меню F7 (свободных мест): **{ghost_count}**{recent}"
+        )
+        await interaction.followup.send(msg)
+
+
+
+    @bot.tree.command(name="setniggalink", description="Привязать текущий канал для логов входов и выходов участников (NiggaLink)")
+    async def cmd_setniggalink(interaction: discord.Interaction):
+        bot.cfg["member_log_channel_id"] = interaction.channel_id
+        save_config(bot.cfg)
+        await interaction.response.send_message(
+            f"✅ Логи участников (входы/выходы NiggaLink) привязаны к <#{interaction.channel_id}>.",
+            ephemeral=True
+        )
+
+
+def create_bot(enable_members: bool = True) -> TelemetryBot:
+    intents = discord.Intents.default()
+    if enable_members:
+        intents.members = True
+    b = TelemetryBot(intents=intents)
+    setup_commands(b)
+    return b
+
+
+bot = create_bot(enable_members=True)
 
 def main():
+    global bot
     cfg = load_config()
     token = os.environ.get("DISCORD_TOKEN") or cfg.get("discord_token", "")
     if not token or token.startswith("ВСТАВЬ"):
         print("[-] ОШИБКА: Задай токен бота в bot_config.json!", flush=True)
         sys.exit(1)
-    bot.run(token)
+    try:
+        bot.run(token)
+    except discord.PrivilegedIntentsRequired:
+        print("[!] ВНИМАНИЕ: Server Members Intent не включен в Discord Developer Portal!", flush=True)
+        print("[!] Включи 'SERVER MEMBERS INTENT' в https://discord.com/developers/applications (вкладка Bot -> Privileged Gateway Intents).", flush=True)
+        print("[!] Бот запускается в безопасном режиме без логирования участников...", flush=True)
+        bot = create_bot(enable_members=False)
+        bot.run(token)
 
 
 if __name__ == "__main__":
