@@ -60,7 +60,7 @@ PRESET_NAMES = {
     "KesslerSyndrome": "Синдром Кесслера (KesslerSyndrome)",
     "AllAtOnce": "Все сразу (AllAtOnce)",
     "ExtraLowPop": "Низкий онлайн (ExtraLowPop)",
-    "Dynamic": "Динамический режим (Dynamic)",
+    "Dynamic": "Динамический (Dynamic)",
     "Secret": "Секрет (Secret)"
 }
 
@@ -80,8 +80,7 @@ PRESET_ANTAG_NAMES = {
     "Greenshift": "Мидраунд антагонист",
     "Extended": "Мидраунд антагонист",
     "Навозная Яма": "Мидраунд антагонист",
-    "Survival": "Выживание",
-    "Dynamic": "Динамический режим"
+    "Survival": "Выживание"
 }
 
 PRESET_RULES = {
@@ -601,6 +600,12 @@ def is_major_antag(rule: str) -> bool:
 
 GAMERULE_DESCRIPTIONS = {
     # Core & Dynamic Schedulers
+    "DynamicRule": "Динамический сторителлер",
+    "DummyNonAntag": "Скрытый бросок антагонистов",
+    "DummyNonAntagChance": "Проверка скрытых антагонистов",
+    "StorytellerClassicRule": "Классический сторителлер",
+    "StorytellerCalmRule": "Спокойный сторителлер",
+    "StorytellerInsaneRule": "Безумный сторителлер",
     "CombatDynamic": "Боевой динамик (The Guide)",
     "CalmDynamic": "Спокойный динамик (The Ghost)",
     "ChaoticDynamic": "Хаотичный динамик (The Tempest)",
@@ -1109,6 +1114,7 @@ class ServerTracker:
         self.corvax_lobby_purged = False
         self.corvax_map = None
         self.corvax_preset = None
+        self.corvax_active_antags = {}
 
         # CorvaxGoob tracking
         self.cg_last_run_level = None
@@ -1566,6 +1572,10 @@ class TelemetryBot(commands.Bot):
             t.last_antag_count = 0
             t.last_ghost_roles_count = 0
             t.current_preset = None
+            t.corvax_active_antags.clear()
+            t.corvax_antags_lost.clear()
+            t.corvax_prev_comp.clear()
+            t.rule_spawn_times.clear()
 
         # 4. LOBBY DETECTION & CLEANUP
         if run_level == 0 and t.corvax_last_run_level != 0:
@@ -1595,6 +1605,10 @@ class TelemetryBot(commands.Bot):
             t.known_antag_objectives.clear()
             t.recent_ghost_antags.clear()
             t.cargo_cache.clear()
+            t.corvax_active_antags.clear()
+            t.corvax_antags_lost.clear()
+            t.corvax_prev_comp.clear()
+            t.rule_spawn_times.clear()
             t.last_antag_count = None
             t.last_ghost_roles_count = None
 
@@ -1747,6 +1761,8 @@ class TelemetryBot(commands.Bot):
                 diff = cur_antags - t.last_antag_count
                 if newly_assigned_roles:
                     roles_str = ", ".join(newly_assigned_roles)
+                    for r_name in newly_assigned_roles:
+                        t.corvax_active_antags[r_name] = t.corvax_active_antags.get(r_name, 0) + 1
                     await self.notify_channel(
                         channel, 
                         f"**[{tag}] На станции появился антагонист: {roles_str} (+{diff}). Всего активных: {cur_antags}.**",
@@ -1754,6 +1770,7 @@ class TelemetryBot(commands.Bot):
                     )
                 elif t.recent_ghost_antags:
                     claimed_role = t.recent_ghost_antags.pop(0)
+                    t.corvax_active_antags[claimed_role] = t.corvax_active_antags.get(claimed_role, 0) + diff
                     await self.notify_channel(
                         channel, 
                         f"**[{tag}] Игрок взял гост-роль антагониста: {claimed_role} (+{diff}). Всего активных: {cur_antags}.**",
@@ -1761,19 +1778,19 @@ class TelemetryBot(commands.Bot):
                     )
                 else:
                     preset_role = PRESET_ANTAG_NAMES.get(t.current_preset, "")
-                    if t.current_preset in ("Greenshift", "Extended", "Мирный", "Навозная Яма") or not preset_role or "Мирный" in preset_role or "Яма" in preset_role:
-                        antag_desc = "Мидраунд антагонист"
+                    if t.current_preset in ("Dynamic", "Secret", "Greenshift", "Extended", "Мирный", "Навозная Яма") or not preset_role or any(x in preset_role for x in ("Мирный", "Яма", "Мидраунд", "Динамич", "Секрет")):
+                        antag_msg = f"**[{tag}] На станции появился антагонист (+{diff}). Всего активных: {cur_antags}.**"
                     else:
-                        antag_desc = preset_role
+                        antag_msg = f"**[{tag}] На станции активен антагонист: {preset_role} (+{diff}). Всего активных: {cur_antags}.**"
                     await self.notify_channel(
                         channel, 
-                        f"**[{tag}] На станции активен антагонист: {antag_desc} (+{diff}). Всего активных: {cur_antags}.**",
+                        antag_msg,
                         is_critical=True
                     )
             elif cur_antags < t.last_antag_count and round_len > 40:
                 diff = t.last_antag_count - cur_antags
                 preset_role = PRESET_ANTAG_NAMES.get(t.current_preset, "")
-                if t.current_preset in ("Greenshift", "Extended", "Мирный", "Навозная Яма") or not preset_role or "Мирный" in preset_role or "Яма" in preset_role or "Мидраунд" in preset_role:
+                if t.current_preset in ("Dynamic", "Secret", "Greenshift", "Extended", "Мирный", "Навозная Яма") or not preset_role or any(x in preset_role for x in ("Мирный", "Яма", "Мидраунд", "Динамич", "Секрет")):
                     role_info = ""
                 else:
                     role_info = f" ({preset_role})"
@@ -1784,6 +1801,8 @@ class TelemetryBot(commands.Bot):
                 )
             elif newly_assigned_roles:
                 roles_str = ", ".join(newly_assigned_roles)
+                for r_name in newly_assigned_roles:
+                    t.corvax_active_antags[r_name] = t.corvax_active_antags.get(r_name, 0) + 1
                 await self.notify_channel(
                     channel, 
                     f"**[{tag}] Экипаж получил скрытую роль антагониста: {roles_str}. Выданы боевые цели.**",
@@ -1863,14 +1882,32 @@ class TelemetryBot(commands.Bot):
                 lost = t.corvax_antags_lost.get(r_tag, 0)
                 if c_val > 0:
                     if lost > 0:
-                        antags_breakdown.append(f"• **{r_ru}**: **{c_val}** *({lost} убит / вышел)*")
+                        antags_breakdown.append(f"  • **{r_ru}**: **{c_val}** *({lost} убит / вышел)*")
                     else:
-                        antags_breakdown.append(f"• **{r_ru}**: **{c_val}**")
+                        antags_breakdown.append(f"  • **{r_ru}**: **{c_val}**")
                 elif lost > 0:
-                    antags_breakdown.append(f"• ~~{r_ru}~~: 0 *({lost} убит / вышел)*")
+                    antags_breakdown.append(f"  • ~~{r_ru}~~: 0 *({lost} убит / вышел)*")
             t.corvax_prev_comp = cur_comp
+        elif t.corvax_active_antags:
+            known_sum = sum(t.corvax_active_antags.values())
+            for r_name, r_cnt in sorted(t.corvax_active_antags.items(), key=lambda x: x[1], reverse=True):
+                if r_cnt > 0:
+                    antags_breakdown.append(f"  • **{r_name}**: **{r_cnt}**")
+            unrevealed = max(0, cur_antags - known_sum)
+            if unrevealed > 0:
+                antags_breakdown.append(f"  • **Скрытые антагонисты**: **{unrevealed}**")
 
-        antags_roster_str = "\n".join(antags_breakdown) if antags_breakdown else f"• Всего на станции: **{cur_antags}**"
+        if run_level == 0:
+            antags_total_str = "0"
+            antags_roster_str = "  • Отсутствуют (0)"
+        else:
+            antags_total_str = f"Всего: **{cur_antags}**"
+            if antags_breakdown:
+                antags_roster_str = "\n".join(antags_breakdown)
+            elif cur_antags > 0:
+                antags_roster_str = f"  • **Скрытые антагонисты**: **{cur_antags}**"
+            else:
+                antags_roster_str = "  • Отсутствуют (0)"
 
         r_ghost = await prom_query(prom_url, self.session, f"ss14_storyteller_available_ghost_roles{{job='{job}'}}")
         ghost_count = r_ghost[0]["value"][1] if r_ghost else "0"
@@ -1880,12 +1917,23 @@ class TelemetryBot(commands.Bot):
         round_id_str = f"#{status_round_id or cur_round}" if (status_round_id or cur_round) else "?"
 
         raw_corvax_rules = list(PRESET_RULES.get(preset_name, [preset_name, "BasicStationEventScheduler", "BasicRoundstartVariation"]))
+        for r_known in t.corvax_active_antags:
+            if r_known not in raw_corvax_rules:
+                if r_known not in t.rule_spawn_times:
+                    m_t, s_t = divmod(round_len, 60)
+                    t.rule_spawn_times[r_known] = f"{m_t:02d}:{s_t:02d}" if round_len > 30 else "00:00"
+                raw_corvax_rules.append(r_known)
+
         rules_list = []
         for r in raw_corvax_rules:
             if r not in t.rule_spawn_times:
                 t.rule_spawn_times[r] = "00:00"
             rules_list.append(format_rule_entry(r, t.rule_spawn_times.get(r, "00:00")))
-        footer_text = f"Экипаж: {alive} живых / {dead} мертвых" if (str(alive).isdigit() and int(alive) > 0) else f"Онлайн: {real_players} игроков"
+
+        if run_level == 0:
+            footer_text = "Ожидание старта раунда"
+        else:
+            footer_text = ""
 
         embed = make_dashboard_embed(
             title=("РЫБЬЯ СТАНЦИЯ: ПЕРСЕЙ" if job in ("perseus", "persey") else f"SUNRISE: {job.upper()}"),
@@ -1897,8 +1945,8 @@ class TelemetryBot(commands.Bot):
             map_name=status_map or t.corvax_map or "?",
             preset_title=preset_title,
             admins_str=f"{active_admins} активных / {deadminned_admins} скрытых",
-            ghosts_str=f"{ghost_count} мест в F7",
-            antags_total_str=f"Всего: **{cur_antags}**",
+            ghosts_str=str(ghost_count),
+            antags_total_str=antags_total_str,
             antags_roster_str=antags_roster_str,
             rules_list=rules_list,
             footer_text=footer_text
@@ -3094,7 +3142,10 @@ def setup_commands(bot: TelemetryBot):
         preset_title = PRESET_NAMES.get(preset_name, preset_name)
         rules_text = format_rules_stack(preset_name)
 
-        role_desc = PRESET_ANTAG_NAMES.get(preset_name, f"Антагонисты ({preset_name})")
+        if preset_name in ("Dynamic", "Secret"):
+            role_desc = "Скрытые антагонисты"
+        else:
+            role_desc = PRESET_ANTAG_NAMES.get(preset_name, f"Антагонисты ({preset_name})")
         if antags_num == 0:
             composition_text = "Все антагонисты нейтрализованы или раунд мирный (0 живых)."
         else:
@@ -3363,7 +3414,10 @@ def setup_commands(bot: TelemetryBot):
 
         preset_title = PRESET_NAMES.get(preset_name, preset_name)
         rules_text = format_rules_stack(preset_name)
-        role_desc = PRESET_ANTAG_NAMES.get(preset_name, preset_name)
+        if preset_name in ("Dynamic", "Secret"):
+            role_desc = "Скрытые антагонисты"
+        else:
+            role_desc = PRESET_ANTAG_NAMES.get(preset_name, preset_name)
         antag_status_str = f"**{antags_cnt}** ({role_desc})" if int(antags_cnt) > 0 else "**0**"
 
         r_roles = await prom_query(prom_url, bot.session, f"ss14_storyteller_available_ghost_roles{{job='{server}'}}")
